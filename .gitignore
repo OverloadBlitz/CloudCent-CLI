@@ -1,0 +1,21 @@
+# Build
+/target
+
+# IDE
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Metadata / data exports
+metadata_export.json
+
+# Debug / build artifacts
+build_log.txt
+cargo_found.txt
+cargo_search.txt
+*.bat
+*.ps1
+null
