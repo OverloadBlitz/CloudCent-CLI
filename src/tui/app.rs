@@ -1,5 +1,5 @@
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -119,7 +119,11 @@ impl App {
             // Handle input
             if event::poll(Duration::from_millis(100))? {
                 if let Event::Key(key) = event::read()? {
-                    self.handle_key(key)?;
+                    // Only handle key press events; ignore Release/Repeat to avoid
+                    // double-firing on Windows where crossterm emits multiple events.
+                    if key.kind == KeyEventKind::Press {
+                        self.handle_key(key)?;
+                    }
                 }
             }
             
