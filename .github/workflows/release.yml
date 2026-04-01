@@ -163,6 +163,92 @@ jobs:
             cd ../..
           done
 
+      - name: Generate cloudcent.js launcher
+        run: |
+          mkdir -p npm/cloudcent/bin
+          node -e "
+            const fs = require('fs');
+            const script = [
+              '#!/usr/bin/env node',
+              '',
+              'const { spawnSync } = require(\"child_process\");',
+              'const path = require(\"path\");',
+              'const os = require(\"os\");',
+              '',
+              'const PLATFORMS = {',
+              '  \"darwin-arm64\":  \"@cloudcent/cli-darwin-arm64\",',
+              '  \"darwin-x64\":    \"@cloudcent/cli-darwin-x64\",',
+              '  \"linux-arm64\":   \"@cloudcent/cli-linux-arm64\",',
+              '  \"linux-x64\":     \"@cloudcent/cli-linux-x64\",',
+              '  \"win32-arm64\":   \"@cloudcent/cli-win32-arm64\",',
+              '  \"win32-x64\":     \"@cloudcent/cli-win32-x64\",',
+              '};',
+              '',
+              'const platform = \`\${os.platform()}-\${os.arch()}\`;',
+              'const pkg = PLATFORMS[platform];',
+              '',
+              'if (!pkg) {',
+              '  console.error(\`Unsupported platform: \${platform}\`);',
+              '  process.exit(1);',
+              '}',
+              '',
+              'const binName = os.platform() === \"win32\" ? \"cloudcent.exe\" : \"cloudcent\";',
+              '',
+              'let binPath;',
+              'try {',
+              '  binPath = path.join(',
+              '    path.dirname(require.resolve(\`\${pkg}/package.json\`)),',
+              '    \"bin\",',
+              '    binName',
+              '  );',
+              '} catch {',
+              '  console.error(',
+              '    \`Could not find binary package \${pkg}.\\n\` +',
+              '    \`Try reinstalling: npm install -g @cloudcent/cli\`',
+              '  );',
+              '  process.exit(1);',
+              '}',
+              '',
+              'const result = spawnSync(binPath, process.argv.slice(2), {',
+              '  stdio: \"inherit\",',
+              '  env: process.env,',
+              '});',
+              '',
+              'process.exit(result.status ?? 1);',
+            ].join('\n');
+            fs.writeFileSync('npm/cloudcent/bin/cloudcent.js', script + '\n');
+            fs.chmodSync('npm/cloudcent/bin/cloudcent.js', 0o755);
+          "
+          echo "==> Generated cloudcent.js:"
+          ls -la npm/cloudcent/bin/cloudcent.js
+          head -3 npm/cloudcent/bin/cloudcent.js
+
+      - name: Local pack & install test (linux-x64)
+        run: |
+          echo "==> Packing platform package..."
+          cd npm/linux-x64
+          PLATFORM_TGZ=$(npm pack 2>&1 | tail -1)
+          cd ../..
+
+          echo "==> Packing main package..."
+          cd npm/cloudcent
+          MAIN_TGZ=$(npm pack 2>&1 | tail -1)
+          cd ../..
+
+          echo "==> Installing locally..."
+          npm install -g "npm/linux-x64/${PLATFORM_TGZ}"
+          npm install -g "npm/cloudcent/${MAIN_TGZ}"
+
+          echo "==> Verifying cloudcent command..."
+          which cloudcent
+          cloudcent --help || true
+
+          echo "==> Cleaning up..."
+          npm uninstall -g @cloudcent/cli
+          npm uninstall -g @cloudcent/cli-linux-x64
+
+          echo "==> Local test passed!"
+
       - name: Publish darwin-arm64
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -229,5 +315,14 @@ jobs:
             }
             require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
+
+          # Verify bin/cloudcent.js is included before publishing
+          echo "==> Verifying package contents..."
+          npm pack --dry-run 2>&1 | tee /tmp/pack-contents.txt
+          if ! grep -q "bin/cloudcent.js" /tmp/pack-contents.txt; then
+            echo "ERROR: bin/cloudcent.js not found in package contents!"
+            exit 1
+          fi
+          echo "==> bin/cloudcent.js confirmed in package."
 
           npm publish --access public
