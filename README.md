@@ -29,20 +29,20 @@ npm install -g @cloudcent/cli
 ### Shell script (macOS / Linux)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CloudCentIO/cost-estimator-cli-rs/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/OverloadBlitz/cloudcent-cli/main/install.sh | bash
 ```
 
 ### PowerShell (Windows)
 
 ```powershell
-irm https://raw.githubusercontent.com/CloudCentIO/cost-estimator-cli-rs/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/OverloadBlitz/cloudcent-cli/main/install.ps1 | iex
 ```
 
 ### Build from source
 
 ```bash
-git clone https://github.com/CloudCentIO/cost-estimator-cli-rs.git
-cd cost-estimator-cli-rs
+git clone https://github.com/OverloadBlitz/cloudcent-cli.git
+cd cloudcent-cli
 cargo build --release
 # Binary at target/release/cloudcent
 ```

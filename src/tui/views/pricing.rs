@@ -2221,7 +2221,9 @@ impl PricingView {
                         format!("{} {}", item.provider, item.product)
                     },
                     region: item.region,
-                    attributes: item.attributes,
+                    attributes: item.attributes.into_iter().map(|(k, v)| {
+                        (k, v.map(|av| av.to_string()))
+                    }).collect(),
                     prices,
                     min_price: Self::stringify_json(&item.min_price),
                     max_price: Self::stringify_json(&item.max_price),

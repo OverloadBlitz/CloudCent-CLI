@@ -1,6 +1,31 @@
 use std::collections::HashMap;
+use std::fmt;
 use serde::{Deserialize, Serialize};
 use indexmap::IndexMap;
+
+/// Attribute value that can be any JSON type (string, number, array, etc.)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AttrValue(pub serde_json::Value);
+
+impl fmt::Display for AttrValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            serde_json::Value::String(s) => write!(f, "{}", s),
+            serde_json::Value::Number(n) => write!(f, "{}", n),
+            serde_json::Value::Array(arr) => {
+                let parts: Vec<String> = arr.iter().map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                }).collect();
+                write!(f, "{}", parts.join(", "))
+            }
+            serde_json::Value::Bool(b) => write!(f, "{}", b),
+            serde_json::Value::Null => write!(f, ""),
+            other => write!(f, "{}", other),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -47,7 +72,7 @@ pub struct PricingItem {
     pub provider: String,
     pub region: String,
     #[serde(default)]
-    pub attributes: IndexMap<String, Option<String>>,
+    pub attributes: IndexMap<String, Option<AttrValue>>,
     pub prices: Vec<Price>,
     #[serde(rename = "minPrice", default)]
     pub min_price: Option<serde_json::Value>,
