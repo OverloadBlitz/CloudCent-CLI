@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="CloudCentIO/cost-estimator-cli-rs"
+REPO="OverloadBlitz/cloudcent-cli"
 BINARY="cloudcent"
 INSTALL_DIR="/usr/local/bin"
 

@@ -685,42 +685,66 @@ impl App {
             
             match data {
                 CallbackData::Received { cli_id, api_key } => {
-                    // Check if this is from auth or metadata loading
-                    if self.view_mode == ViewMode::InitAuth {
-                        // In initial auth flow
-                        self.pricing_view.load_options(self.user_command.client());
-                        #[cfg(feature = "estimate")]
-                        { self.estimate_view.options = self.pricing_view.options.clone(); }
-                        self.view_mode = ViewMode::Pricing;
-                        self.auth_state = AuthState::Prompt;
-                        self.callback_data = None;
-                    } else {
-                        // On-demand refresh via F3
-                        self.pricing_view.load_options(self.user_command.client());
-                        #[cfg(feature = "estimate")]
-                        { self.estimate_view.options = self.pricing_view.options.clone(); }
-                        self.metadata_refresh_msg = Some(("Refresh Succeed".to_string(), true));
-                        self.refresh_msg_frames = 40;
-                        self.auth_state = AuthState::Prompt; // Reset from Loading
-                        self.callback_data = None;
-                    }
-
                     if !cli_id.is_empty() && !api_key.is_empty() {
-                        // Auth completed
+                        // Auth credentials just received — save config, then auto-trigger metadata download
                         let rt = tokio::runtime::Runtime::new()?;
-                        
                         let result = rt.block_on(async {
                             self.user_command.complete_auth_for_tui(&cli_id, &api_key).await
                         });
-                        
                         match result {
                             Ok(_) => {
-                                self.auth_state = AuthState::Success;
+                                // Reload config so the client has the new API key
+                                let _ = self.user_command.client_mut().load_config();
+                                // Automatically start metadata download without requiring user to press Enter
+                                self.auth_state = AuthState::Loading;
+                                self.loading_frame = 0;
+                                self.callback_data = None;
+
+                                let user_command = self.user_command.client().clone();
+                                let cb = Arc::new(Mutex::new(CallbackData::Pending));
+                                let cb_clone = cb.clone();
+                                self.callback_data = Some(cb);
+
+                                std::thread::spawn(move || {
+                                    let rt = tokio::runtime::Runtime::new().unwrap();
+                                    let result = rt.block_on(async {
+                                        user_command.download_metadata_gz().await
+                                    });
+                                    match result {
+                                        Ok(_) => {
+                                            *cb_clone.lock().unwrap() = CallbackData::Received {
+                                                cli_id: String::new(),
+                                                api_key: String::new(),
+                                            };
+                                        }
+                                        Err(e) => {
+                                            *cb_clone.lock().unwrap() = CallbackData::Failed(e.to_string());
+                                        }
+                                    }
+                                });
                             }
                             Err(e) => {
                                 self.error_message = Some(e);
                                 self.auth_state = AuthState::Error;
+                                self.callback_data = None;
                             }
+                        }
+                    } else {
+                        // Metadata download completed (cli_id/api_key are empty sentinels)
+                        self.pricing_view.load_options(self.user_command.client());
+                        #[cfg(feature = "estimate")]
+                        { self.estimate_view.options = self.pricing_view.options.clone(); }
+                        self.callback_data = None;
+
+                        if self.view_mode == ViewMode::InitAuth {
+                            // Initial auth flow: transition to Pricing
+                            self.view_mode = ViewMode::Pricing;
+                            self.auth_state = AuthState::Prompt;
+                        } else {
+                            // On-demand refresh via F3
+                            self.metadata_refresh_msg = Some(("Refresh Succeed".to_string(), true));
+                            self.refresh_msg_frames = 40;
+                            self.auth_state = AuthState::Prompt;
                         }
                     }
                 }

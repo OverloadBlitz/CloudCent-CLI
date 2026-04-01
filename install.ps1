@@ -1,9 +1,8 @@
 # PowerShell install script for cloudcent (Windows)
-# Usage: irm https://raw.githubusercontent.com/CloudCentIO/cost-estimator-cli-rs/main/install.ps1 | iex
 
 $ErrorActionPreference = "Stop"
 
-$Repo = "CloudCentIO/cost-estimator-cli-rs"
+$Repo = "OverloadBlitz/cloudcent-cli"
 $Binary = "cloudcent"
 $InstallDir = "$env:USERPROFILE\.cloudcent\bin"
 
