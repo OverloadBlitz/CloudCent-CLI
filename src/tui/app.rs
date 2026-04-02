@@ -177,6 +177,13 @@ impl App {
             }
             AuthState::Waiting => {
                 match key.code {
+                    KeyCode::Char('r') | KeyCode::Char('R') => {
+                        // Cancel current poll and restart auth flow
+                        self.callback_data = None;
+                        self.exchange_code = String::new();
+                        self.auth_state = AuthState::Prompt;
+                        self.start_auth_flow()?;
+                    }
                     KeyCode::Esc => {
                         self.should_quit = true;
                     }

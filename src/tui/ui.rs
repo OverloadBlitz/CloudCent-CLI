@@ -155,7 +155,9 @@ fn render_auth_waiting(f: &mut Frame, _app: &App) {
         Line::from(vec![
             Span::raw("Press "),
             Span::styled("Esc", Style::default().fg(Color::Red)),
-            Span::raw(" to cancel"),
+            Span::raw(" to cancel  "),
+            Span::styled("r", Style::default().fg(Color::Yellow).bold()),
+            Span::raw(" to retry"),
         ]),
     ];
     
