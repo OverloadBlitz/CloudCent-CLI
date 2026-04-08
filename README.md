@@ -1,31 +1,13 @@
-# CloudCent Cli
+# CloudCent CLI
+
+<p align="center">
+  <img src="docs/banner.svg" alt="Animated 4-Column Banner" width="100%">
+</p>
 
 A terminal UI for querying and comparing cloud pricing across providers, built with Rust and [Ratatui](https://ratatui.rs).
 
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 ![Version](https://img.shields.io/badge/version-0.0.1--beta-orange)
-
-> ⚠️ Beta: each query returns up to 150 results, sorted by min price ascending.
-
-## Two Ways to Query
-
-CloudCent works in both directions — start from what you know, find what you need:
-
-- **Spec → Cost**: Know your requirements? Describe the instance type, region, storage class, or any spec, and CloudCent returns the matching price. Filter by vCPU count, memory, storage tier, and more.
-- **Cost → Spec**: Have a budget? Set a price ceiling or floor and discover which products and configurations fit within it. Use `>`, `<`, `>=`, `<=` operators to explore what's available at your price point.
-
-## Features
-
-- Multi-cloud pricing search — query pricing data across AWS, GCP, Azure and more from a single interface
-- Smart suggestions — fuzzy matching and semantic aliases (e.g. type "compute" to find EC2, Compute Engine, VMs)
-- Command builder — structured form with product, region, attribute, and price filter fields with autocomplete
-- Raw command mode — type queries directly for power users (`product <name> region <region> attrs <key=value>`)
-- Attribute filtering — drill into instance types, storage classes, vCPU counts, etc.
-- Price operators — filter results with `>`, `<`, `>=`, `<=`
-- Query history — browse past queries, preview cached results, and re-run with one keystroke
-- Local caching — SQLite-backed cache for pricing data and metadata (3-day TTL)
-- Settings view — view your CLI ID, API key, and config path
-- Cross-platform — runs on macOS, Linux, and Windows (x64 and ARM64)
 
 ## Installation
 
@@ -68,23 +50,43 @@ On first launch you'll be prompted to authenticate via browser. This sets up a f
 
 ![Home](docs/home.png)
 
-**Pricing example**
+**Pricing**
 
-![Pricing example](docs/example.png)
+![Pricing](docs/example.png)
 
 ## Supported Providers & Pricing Models
 
-| Provider | Services |
-|----------|----------|
-| AWS | EC2, ECS, EKS, S3, RDS, ElastiCache, EMR, SageMaker, Bedrock, Direct Connect, Data Transfer, Backup |
-| GCP | Compute Engine, Cloud Storage, Cloud SQL, GKE, Memorystore, Vertex AI, Big Data, Data Transfer |
-| Azure | Virtual Machines, AKS, Container, Storage, SQL Database, Redis, Backup, Machine Learning, OpenAI, ExpressRoute, Bandwidth, Big Data |
-| OCI | Compute, Object Storage, Database Instance, Cache, Backup, FastConnect, Data Transfer, Generative AI |
-Pricing models vary by provider — OnDemand, Reserved/Committed, Spot/Preemptible, and token-based (for AI APIs).mptible, and token-based (for AI APIs).
+| Provider | Services | Pricing Model                                                    |
+|----------|----------|------------------------------------------------------------------|
+| AWS | EC2, ECS, EKS, S3, RDS, ElastiCache, EMR, SageMaker, Bedrock, Direct Connect, Data Transfer, Backup | OnDemand, Reserved, SavingPlan, Spot                             |
+| Azure | Virtual Machines, AKS, Container, Storage, SQL Database, Redis, Backup, Machine Learning, OpenAI, ExpressRoute, Bandwidth, Big Data | OnDemand, Reserved, SavingPlan (with/without Azure Hybrid Benefit) |
+| GCP | Compute Engine, Cloud Storage, Cloud SQL, GKE, Memorystore, Vertex AI, Big Data, Data Transfer | OnDemand, CommitedUseDiscount, Preemptible               |
+| OCI | Compute, Object Storage, Database Instance, Cache, Backup, FastConnect, Data Transfer, Generative AI | OnDemand (PAYG)                                                  |
 
-> Beta limitation: each query returns up to 150 results, sorted by min price ascending.
+> ⚠️ Beta limitation:
+> * **Result Limit**: Queries return a maximum of 150 results, sorted by minimum price (ascending)
+> * **Data Freshness**: Pricing data is updated on a weekly basis
+> * GCP Custom machine types and OCI Flexible shapes are not yet supported (WIP)
 
-> Available products and pricing models are fetched dynamically from the API and may expand over time.
+## Two Ways to Query
+
+This tool works in both directions — start from what you know, find what you need:
+
+- **Spec → Cost**: Know your requirements? Describe the instance type, region, storage class, or any specs, and CloudCent returns the matching price. Filter by vCPU count, memory, storage tier, and more.
+- **Cost → Spec**: Have a budget? Set a price ceiling or floor and discover which products and configurations fit within it. Use `>`, `<`, `>=`, `<=` operators to explore what's available at your price point.
+
+## Features
+
+- Multi-cloud pricing search — query pricing data across AWS, GCP, Azure and more from a single interface
+- Smart suggestions — fuzzy matching and semantic aliases (e.g. type "compute" to find EC2, Compute Engine, VMs)
+- Command builder — structured form with product, region, attribute, and price filter fields with autocomplete
+- Raw command mode — type queries directly for power users (`product <name> region <region> specs <key=value>`)
+- Attribute filtering — drill into instance types, storage classes, vCPU counts, etc.
+- Price operators — filter results with `>`, `<`, `>=`, `<=`
+- Query history — browse past queries, preview cached results, and re-run with one keystroke
+- Local caching — SQLite-backed cache for pricing data and metadata (3-day TTL)
+- Settings view — view your CLI ID, API key, and config path
+- Cross-platform — runs on macOS, Linux, and Windows (x64 and ARM64)
 
 ## Project Structure
 

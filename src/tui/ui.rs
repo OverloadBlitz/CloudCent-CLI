@@ -11,7 +11,7 @@ use super::app::{App, AuthState, ViewMode};
 pub fn render(f: &mut Frame, app: &App) {
     match app.view_mode {
         ViewMode::InitAuth => render_init_auth(f, app),
-        ViewMode::Pricing => app.pricing_view.render(f, true),
+        ViewMode::Pricing => app.pricing_view.render(f, f.area(), true),
         #[cfg(feature = "estimate")]
         ViewMode::Estimate => app.estimate_view.render(f, true),
         ViewMode::Settings => {

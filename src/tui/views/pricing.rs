@@ -9,7 +9,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::api::{CloudCentClient, PricingApiResponse};
+use crate::api::PricingApiResponse;
 use crate::tui::semantic::{
     score_and_suggest_products, suggest_attrs, suggest_regions, SuggestionItem,
 };
@@ -39,23 +39,29 @@ pub struct PriceInfo {
     pub upfront_fee: String,
     pub purchase_option: String,
     pub year: String,
+    /// Spot-specific: max interruption probability percentage
+    pub interruption_max_pct: Option<String>,
     /// All rate tiers (empty if single flat price)
     pub rates: Vec<RateInfo>,
 }
 
-// ── Command modes ────────────────────────────────────────────────────────────
+// ── Focus within the command area ────────────────────────────────────────────
 
-#[derive(Clone, PartialEq)]
-pub enum CommandMode {
-    RawCommand,
-    CommandBuilder,
-}
-
-/// Within CommandBuilder, tracks whether keyboard focus is on the field rows or the suggestion list.
+/// Tracks whether keyboard focus is on the field row or the suggestion list.
 #[derive(Clone, PartialEq)]
 pub enum BuilderFocus {
     Field,
     Suggestions,
+}
+
+/// Whether the command bar is in raw-text mode or structured builder mode.
+#[cfg(feature = "raw_command")]
+#[derive(Clone, PartialEq)]
+pub enum CommandMode {
+    /// Structured builder: 4 field slots, suggestions always visible.
+    Builder,
+    /// Free-text input: single text box, suggestions only shown after Tab.
+    Raw,
 }
 
 /// State for the structured command builder.
@@ -129,12 +135,27 @@ pub enum PricingEvent {
 
 #[derive(Clone)]
 pub struct PricingView {
-    pub command_mode: CommandMode,
-    /// Raw text input (used only in RawCommand mode).
-    pub command_input: String,
     pub command_builder: CommandBuilderState,
-    /// Whether keyboard focus is on the field rows or the suggestion list (builder mode only).
+    /// Whether keyboard focus is on the field row or the suggestion list.
     pub builder_focus: BuilderFocus,
+    /// Current command input mode.
+    #[cfg(feature = "raw_command")]
+    pub command_mode: CommandMode,
+    /// Raw text input (used in Raw mode).
+    #[cfg(feature = "raw_command")]
+    pub raw_input: String,
+    /// Cursor byte position within raw_input.
+    #[cfg(feature = "raw_command")]
+    pub raw_cursor: usize,
+    /// Whether to show suggestions in Raw mode (toggled by Tab).
+    #[cfg(feature = "raw_command")]
+    pub raw_show_suggestions: bool,
+    /// In raw mode: which command keyword is highlighted in the left suggestion column (0-3).
+    #[cfg(feature = "raw_command")]
+    pub raw_cmd_index: usize,
+    /// In raw mode: whether keyboard focus is on the params (right) column vs command (left) column.
+    #[cfg(feature = "raw_command")]
+    pub raw_param_focus: bool,
     pub items: Vec<PricingDisplayItem>,
     pub filtered_items: Vec<PricingDisplayItem>,
     pub active_section: PricingSection,
@@ -144,7 +165,7 @@ pub struct PricingView {
     pub loading: bool,
     pub error_message: Option<String>,
     pub options: Option<std::sync::Arc<crate::commands::pricing::PricingOptions>>,
-    /// Current suggestion list (shared between both modes).
+    /// Current suggestion list.
     pub suggestions_cache: Vec<SuggestionItem>,
     /// Highlighted row in the suggestion list (None = no highlight).
     pub suggestion_index: Option<usize>,
@@ -161,11 +182,20 @@ pub struct PricingView {
 impl PricingView {
     pub fn new() -> Self {
         Self {
-            // Default to Builder — more discoverable for first-time users.
-            command_mode: CommandMode::CommandBuilder,
-            command_input: String::new(),
             command_builder: CommandBuilderState::new(),
             builder_focus: BuilderFocus::Field,
+            #[cfg(feature = "raw_command")]
+            command_mode: CommandMode::Builder,
+            #[cfg(feature = "raw_command")]
+            raw_input: String::new(),
+            #[cfg(feature = "raw_command")]
+            raw_cursor: 0,
+            #[cfg(feature = "raw_command")]
+            raw_show_suggestions: false,
+            #[cfg(feature = "raw_command")]
+            raw_cmd_index: 0,
+            #[cfg(feature = "raw_command")]
+            raw_param_focus: false,
             items: Vec::new(),
             filtered_items: Vec::new(),
             active_section: PricingSection::Command,
@@ -184,57 +214,24 @@ impl PricingView {
         }
     }
 
-    pub fn sync_builder_from_raw(&mut self, input: &str) {
-        let tokens: Vec<String> = shlex::split(input).unwrap_or_default();
-        let mut builder = CommandBuilderState::new();
-        
-        let mut i = 0;
-        while i + 1 < tokens.len() {
-            let tk = tokens[i].to_lowercase();
-            if tk == "product" {
-                for v in tokens[i + 1].split(',') {
-                    if !v.is_empty() { builder.product_tags.push(v.to_string()); }
-                }
-            } else if tk == "region" {
-                for v in tokens[i + 1].split(',') {
-                    if !v.is_empty() { builder.region_tags.push(v.to_string()); }
-                }
-            } else if tk == "attrs" {
-                for v in tokens[i + 1].split(',') {
-                    if !v.is_empty() { builder.attribute_tags.push(v.to_string()); }
-                }
-            } else if tk == "price" {
-                for v in tokens[i + 1].split(',') {
-                    if !v.is_empty() { builder.price_tags.push(v.to_string()); }
-                }
-            }
-            i += 1;
-        }
-        self.command_builder = builder;
-    }
 
-    fn field_name(field: usize) -> &'static str {
-        match field {
-            0 => "Product",
-            1 => "Region",
-            2 => "Attrs",
-            _ => "Price",
-        }
-    }
 
     // ── Key handling ─────────────────────────────────────────────────────────
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Result<PricingEvent> {
         // Global shortcuts active regardless of section
         match key.code {
-            KeyCode::F(1) => {
-                self.toggle_mode();
-                return Ok(PricingEvent::None);
-            }
             KeyCode::F(2) => {
-                self.command_input.clear();
                 self.command_builder = CommandBuilderState::new();
                 self.builder_focus = BuilderFocus::Field;
+                #[cfg(feature = "raw_command")]
+                {
+                    self.raw_input.clear();
+                    self.raw_cursor = 0;
+                    self.raw_show_suggestions = false;
+                    self.raw_cmd_index = 0;
+                    self.raw_param_focus = false;
+                }
                 self.suggestions_cache.clear();
                 self.suggestion_index = None;
                 self.filter_items();
@@ -270,55 +267,539 @@ impl PricingView {
     fn handle_key_command(&mut self, key: KeyEvent) -> Result<PricingEvent> {
         match key.code {
             KeyCode::Esc => return Ok(PricingEvent::Quit),
+            // F1: toggle between Builder and Raw mode
+            #[cfg(feature = "raw_command")]
+            KeyCode::F(1) => {
+                match self.command_mode {
+                    CommandMode::Builder => {
+                        self.raw_input = self.builder_to_raw();
+                        self.raw_cursor = self.raw_input.len();
+                        self.command_mode = CommandMode::Raw;
+                    }
+                    CommandMode::Raw => {
+                        self.apply_raw_to_builder();
+                        self.command_mode = CommandMode::Builder;
+                    }
+                }
+                self.builder_focus = BuilderFocus::Field;
+                self.raw_show_suggestions = false;
+                self.raw_cmd_index = 0;
+                self.raw_param_focus = false;
+                self.suggestion_index = None;
+                self.update_suggestions();
+                return Ok(PricingEvent::None);
+            }
+            KeyCode::Tab => {
+                #[cfg(feature = "raw_command")]
+                match self.command_mode {
+                    CommandMode::Builder => {
+                        self.handle_tab_builder();
+                    }
+                    CommandMode::Raw => {
+                        if !self.raw_show_suggestions {
+                            self.raw_show_suggestions = true;
+                            self.update_suggestions_raw();
+                            self.raw_param_focus = false;
+                        } else {
+                            self.raw_show_suggestions = false;
+                            self.raw_param_focus = false;
+                            self.suggestion_index = None;
+                            self.builder_focus = BuilderFocus::Field;
+                        }
+                    }
+                }
+                #[cfg(not(feature = "raw_command"))]
+                self.handle_tab_builder();
+                return Ok(PricingEvent::None);
+            }
             _ => {}
         }
 
-        match self.command_mode {
-            CommandMode::CommandBuilder => self.handle_key_builder(key),
-            CommandMode::RawCommand => self.handle_key_raw(key),
+        match self.builder_focus {
+            BuilderFocus::Field => {
+                #[cfg(feature = "raw_command")]
+                if self.command_mode == CommandMode::Raw {
+                    return self.handle_key_raw_field(key);
+                }
+                self.handle_key_builder_field(key)
+            }
+            BuilderFocus::Suggestions => {
+                #[cfg(feature = "raw_command")]
+                if self.command_mode == CommandMode::Raw {
+                    return self.handle_key_raw_suggestions(key);
+                }
+                self.handle_key_builder_suggestions(key)
+            }
         }
     }
 
-    fn handle_key_builder(&mut self, key: KeyEvent) -> Result<PricingEvent> {
-        match self.builder_focus {
-            BuilderFocus::Field => self.handle_key_builder_field(key),
-            BuilderFocus::Suggestions => self.handle_key_builder_suggestions(key),
+    fn handle_tab_builder(&mut self) {
+        let input = self.command_builder.search_input.clone();
+        if !input.is_empty() && !self.suggestions_cache.is_empty() {
+            if self.suggestions_cache.len() == 1 {
+                self.toggle_suggestion(0);
+            } else {
+                self.suggestion_index = Some(0);
+            }
+        } else if !self.suggestions_cache.is_empty() {
+            self.suggestion_index = Some(0);
         }
+    }
+
+    #[cfg(feature = "raw_command")]
+    fn handle_key_raw_field(&mut self, key: KeyEvent) -> Result<PricingEvent> {
+        match key.code {
+            KeyCode::Up => {
+                self.active_section = PricingSection::Header;
+            }
+            KeyCode::Down => {
+                if self.raw_show_suggestions {
+                    // Move focus into suggestion panel (cmd column)
+                    self.builder_focus = BuilderFocus::Suggestions;
+                    self.raw_param_focus = false;
+                } else if !self.filtered_items.is_empty() {
+                    self.active_section = PricingSection::Results;
+                }
+            }
+            KeyCode::Left => {
+                if self.raw_cursor > 0 {
+                    let s = &self.raw_input[..self.raw_cursor];
+                    self.raw_cursor = s.char_indices().next_back().map(|(i, _)| i).unwrap_or(0);
+                    if self.raw_show_suggestions {
+                        self.update_suggestions_raw();
+                    }
+                } else {
+                    return Ok(PricingEvent::PrevView);
+                }
+            }
+            KeyCode::Right => {
+                if self.raw_cursor < self.raw_input.len() {
+                    let ch = self.raw_input[self.raw_cursor..].chars().next().unwrap();
+                    self.raw_cursor += ch.len_utf8();
+                    if self.raw_show_suggestions {
+                        self.update_suggestions_raw();
+                    }
+                } else {
+                    return Ok(PricingEvent::NextView);
+                }
+            }
+            KeyCode::Enter => {
+                self.apply_raw_to_builder();
+                return Ok(PricingEvent::SubmitQuery);
+            }
+            KeyCode::Backspace => {
+                if self.raw_cursor > 0 {
+                    let s = &self.raw_input[..self.raw_cursor];
+                    let new_cursor = s.char_indices().next_back().map(|(i, _)| i).unwrap_or(0);
+                    self.raw_input.remove(new_cursor);
+                    self.raw_cursor = new_cursor;
+                    if self.raw_show_suggestions {
+                        self.update_suggestions_raw();
+                    }
+                }
+            }
+            KeyCode::Delete => {
+                if self.raw_cursor < self.raw_input.len() {
+                    self.raw_input.remove(self.raw_cursor);
+                    if self.raw_show_suggestions {
+                        self.update_suggestions_raw();
+                    }
+                }
+            }
+            KeyCode::Char(c) => {
+                self.raw_input.insert(self.raw_cursor, c);
+                self.raw_cursor += c.len_utf8();
+                if self.raw_show_suggestions {
+                    self.update_suggestions_raw();
+                }
+            }
+            _ => {}
+        }
+        Ok(PricingEvent::None)
+    }
+
+    /// The keywords recognised in raw command input.
+    #[cfg(feature = "raw_command")]
+    const RAW_KEYWORDS: [&'static str; 4] = ["products", "regions", "specs", "price"];
+
+    /// If the token immediately before the cursor is a unique prefix of a RAW_KEYWORD,
+    /// complete it in-place and return true. Otherwise return false.
+    #[cfg(feature = "raw_command")]
+    fn try_complete_raw_keyword(&mut self) -> bool {
+        let text = &self.raw_input[..self.raw_cursor];
+        let token = match text.split_whitespace().last() {
+            Some(t) => t.to_string(),
+            None => return false,
+        };
+        if token.is_empty() {
+            return false;
+        }
+        let tl = token.to_lowercase();
+        // Already a complete keyword — don't re-complete, just show suggestions
+        if Self::RAW_KEYWORDS.contains(&tl.as_str()) {
+            self.raw_show_suggestions = true;
+            self.update_suggestions_raw();
+            self.suggestion_index = if self.suggestions_cache.is_empty() { None } else { Some(0) };
+            self.builder_focus = BuilderFocus::Suggestions;
+            return true;
+        }
+        let matches: Vec<&str> = Self::RAW_KEYWORDS.iter()
+            .filter(|kw| kw.starts_with(tl.as_str()))
+            .copied()
+            .collect();
+        if matches.len() == 1 {
+            let kw = matches[0];
+            let token_start = self.raw_cursor - token.len();
+            self.raw_input.drain(token_start..self.raw_cursor);
+            let insert = format!("{} ", kw);
+            for (i, ch) in insert.char_indices() {
+                self.raw_input.insert(token_start + i, ch);
+            }
+            self.raw_cursor = token_start + insert.len();
+            self.raw_show_suggestions = true;
+            self.update_suggestions_raw();
+            self.suggestion_index = if self.suggestions_cache.is_empty() { None } else { Some(0) };
+            self.builder_focus = BuilderFocus::Suggestions;
+            return true;
+        }
+        false
+    }
+
+    /// Serialize the current builder state into a raw command string.
+    #[cfg(feature = "raw_command")]
+    fn builder_to_raw(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if !self.command_builder.product_tags.is_empty() {
+            parts.push(format!("products {}", self.command_builder.product_tags.join(",")));
+        }
+        if !self.command_builder.region_tags.is_empty() {
+            parts.push(format!("regions {}", self.command_builder.region_tags.join(",")));
+        }
+        if !self.command_builder.attribute_tags.is_empty() {
+            parts.push(format!("attrs {}", self.command_builder.attribute_tags.join(",")));
+        }
+        if !self.command_builder.price_tags.is_empty() {
+            parts.push(format!("price {}", self.command_builder.price_tags.join(",")));
+        }
+        parts.join(" ")
+    }
+
+    /// Parse raw input into (keyword, token_before_cursor).
+    /// Returns the active keyword (0=products,1=regions,2=attrs,3=price) and
+    /// the partial token the user is currently typing after that keyword.
+    #[cfg(feature = "raw_command")]
+    fn raw_active_field(&self) -> (usize, String) {
+        let text = &self.raw_input[..self.raw_cursor];
+        // Find the last keyword that appears before the cursor
+        let mut best_kw: Option<(usize, usize)> = None; // (field_idx, byte_pos)
+        for (i, kw) in Self::RAW_KEYWORDS.iter().enumerate() {
+            // Search for keyword followed by whitespace or end
+            let mut search = text;
+            let mut offset = 0usize;
+            while let Some(pos) = search.find(kw) {
+                let abs = offset + pos;
+                let after = abs + kw.len();
+                // keyword must be at start or preceded by whitespace
+                let preceded_ok = abs == 0 || text.as_bytes().get(abs - 1).map(|b| b.is_ascii_whitespace()).unwrap_or(false);
+                // keyword must be followed by whitespace or end of text-before-cursor
+                let followed_ok = after >= text.len() || text.as_bytes().get(after).map(|b| b.is_ascii_whitespace()).unwrap_or(false);
+                if preceded_ok && followed_ok {
+                    if best_kw.map(|(_, p)| abs > p).unwrap_or(true) {
+                        best_kw = Some((i, abs));
+                    }
+                }
+                offset += pos + 1;
+                search = &search[pos + 1..];
+            }
+        }
+        match best_kw {
+            None => (0, String::new()),
+            Some((field, kw_pos)) => {
+                let kw_len = Self::RAW_KEYWORDS[field].len();
+                let after_kw = &text[kw_pos + kw_len..];
+                // Tags are comma-separated; the current token is after the last comma (or after the keyword space)
+                let token = after_kw.split(',').last().unwrap_or("").trim_start().to_string();
+                (field, token)
+            }
+        }
+    }
+
+    /// Accept the currently highlighted suggestion into the raw input at cursor.
+    #[cfg(feature = "raw_command")]
+    fn accept_raw_suggestion(&mut self, idx: usize) {
+        if idx >= self.suggestions_cache.len() {
+            return;
+        }
+        let value = self.suggestions_cache[idx].value.clone();
+        if value.is_empty() {
+            return;
+        }
+        let (_, token) = self.raw_active_field();
+        // Remove the partial token before cursor (after last comma or keyword space)
+        let remove_len = token.len();
+        let new_cursor = self.raw_cursor - remove_len;
+        self.raw_input.drain(new_cursor..self.raw_cursor);
+        // Insert the completed value; append comma so user can type another tag
+        let insert = format!("{},", value);
+        for (i, ch) in insert.char_indices() {
+            self.raw_input.insert(new_cursor + i, ch);
+        }
+        self.raw_cursor = new_cursor + insert.len();
+        self.suggestion_index = None;
+        self.update_suggestions_raw();
+    }
+
+    /// Parse the full raw input and populate command_builder tags for submission.
+    #[cfg(feature = "raw_command")]
+    fn apply_raw_to_builder(&mut self) {
+        let text = self.raw_input.clone();
+        self.command_builder = CommandBuilderState::new();
+        // Split on keywords
+        let remaining = text.as_str();
+        // Collect (keyword_idx, value_str) pairs
+        let mut segments: Vec<(usize, &str)> = Vec::new();
+        // Find all keyword positions
+        let mut positions: Vec<(usize, usize)> = Vec::new(); // (byte_pos, field_idx)
+        for (i, kw) in Self::RAW_KEYWORDS.iter().enumerate() {
+            let mut search = remaining;
+            let mut offset = 0usize;
+            while let Some(pos) = search.find(kw) {
+                let abs = offset + pos;
+                let after = abs + kw.len();
+                let preceded_ok = abs == 0 || remaining.as_bytes().get(abs - 1).map(|b| b.is_ascii_whitespace()).unwrap_or(false);
+                let followed_ok = after >= remaining.len() || remaining.as_bytes().get(after).map(|b| b.is_ascii_whitespace()).unwrap_or(false);
+                if preceded_ok && followed_ok {
+                    positions.push((abs, i));
+                }
+                offset += pos + 1;
+                search = &search[pos + 1..];
+            }
+        }
+        positions.sort_by_key(|(p, _)| *p);
+        for (seg_idx, &(pos, field)) in positions.iter().enumerate() {
+            let kw_len = Self::RAW_KEYWORDS[field].len();
+            let value_start = pos + kw_len;
+            let value_end = positions.get(seg_idx + 1).map(|(p, _)| *p).unwrap_or(remaining.len());
+            let value_str = remaining[value_start..value_end].trim();
+            segments.push((field, value_str));
+        }
+        for (field, value_str) in segments {
+            if value_str.is_empty() {
+                continue;
+            }
+            // Tags are comma-separated; each tag may contain spaces (e.g. "anthropic llm api")
+            let tags: Vec<String> = value_str.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            match field {
+                0 => self.command_builder.product_tags = tags,
+                1 => self.command_builder.region_tags = tags,
+                2 => self.command_builder.attribute_tags = tags,
+                _ => self.command_builder.price_tags = tags,
+            }
+        }
+        self.filter_items();
+    }
+
+    #[cfg(feature = "raw_command")]
+    fn handle_key_raw_suggestions(&mut self, key: KeyEvent) -> Result<PricingEvent> {
+        let total_params = self.suggestions_cache.len();
+        match key.code {
+            KeyCode::Up => {
+                if self.raw_param_focus {
+                    if self.suggestion_index.map(|i| i == 0).unwrap_or(true) {
+                        // At top of params: move back to cmd column
+                        self.raw_param_focus = false;
+                        self.suggestion_index = None;
+                    } else {
+                        self.suggestion_index = self.suggestion_index.map(|i| i.saturating_sub(1));
+                    }
+                } else {
+                    if self.raw_cmd_index == 0 {
+                        // At top of cmd column: back to input
+                        self.builder_focus = BuilderFocus::Field;
+                    } else {
+                        self.raw_cmd_index -= 1;
+                        // Update params for newly highlighted keyword
+                        self.update_suggestions_for_cmd_index();
+                    }
+                }
+            }
+            KeyCode::Down => {
+                if self.raw_param_focus {
+                    if total_params > 0 {
+                        let next = self.suggestion_index.map(|i| (i + 1).min(total_params - 1)).unwrap_or(0);
+                        if next == self.suggestion_index.unwrap_or(usize::MAX) {
+                            // At bottom: go to results
+                            if !self.filtered_items.is_empty() {
+                                self.builder_focus = BuilderFocus::Field;
+                                self.active_section = PricingSection::Results;
+                            }
+                        } else {
+                            self.suggestion_index = Some(next);
+                        }
+                    }
+                } else {
+                    if self.raw_cmd_index < 3 {
+                        self.raw_cmd_index += 1;
+                        self.update_suggestions_for_cmd_index();
+                    } else {
+                        // At bottom of cmd column: go to results
+                        if !self.filtered_items.is_empty() {
+                            self.builder_focus = BuilderFocus::Field;
+                            self.active_section = PricingSection::Results;
+                        }
+                    }
+                }
+            }
+            KeyCode::Right => {
+                // Move from cmd column to params column
+                if !self.raw_param_focus && total_params > 0 {
+                    self.raw_param_focus = true;
+                    self.suggestion_index = Some(0);
+                }
+            }
+            KeyCode::Left => {
+                if self.raw_param_focus {
+                    // Move back to cmd column
+                    self.raw_param_focus = false;
+                    self.suggestion_index = None;
+                } else {
+                    // Back to input
+                    self.builder_focus = BuilderFocus::Field;
+                }
+            }
+            KeyCode::Enter => {
+                if self.raw_param_focus {
+                    // Accept param suggestion
+                    if let Some(idx) = self.suggestion_index {
+                        self.accept_raw_suggestion(idx);
+                        self.builder_focus = BuilderFocus::Field;
+                        self.raw_show_suggestions = false;
+                    }
+                } else {
+                    // Accept keyword: insert it into input
+                    self.accept_raw_keyword(self.raw_cmd_index);
+                    self.raw_param_focus = true;
+                    self.suggestion_index = if self.suggestions_cache.is_empty() { None } else { Some(0) };
+                }
+            }
+            KeyCode::Char(' ') => {
+                // Space also accepts
+                if self.raw_param_focus {
+                    if let Some(idx) = self.suggestion_index {
+                        self.accept_raw_suggestion(idx);
+                        self.builder_focus = BuilderFocus::Field;
+                        self.raw_show_suggestions = false;
+                    }
+                } else {
+                    self.accept_raw_keyword(self.raw_cmd_index);
+                    self.raw_param_focus = true;
+                    self.suggestion_index = if self.suggestions_cache.is_empty() { None } else { Some(0) };
+                }
+            }
+            KeyCode::Esc => {
+                self.raw_show_suggestions = false;
+                self.builder_focus = BuilderFocus::Field;
+                self.raw_param_focus = false;
+                self.suggestion_index = None;
+            }
+            _ => {}
+        }
+        Ok(PricingEvent::None)
+    }
+
+    /// Update params suggestions for the keyword currently highlighted in the cmd column.
+    #[cfg(feature = "raw_command")]
+    fn update_suggestions_for_cmd_index(&mut self) {
+        let opts = match self.options.clone() {
+            Some(o) => o,
+            None => { self.suggestions_cache.clear(); return; }
+        };
+        self.suggestions_cache = match self.raw_cmd_index {
+            0 => score_and_suggest_products("", &opts.products, &opts.attribute_values, &opts.product_groups, &[]),
+            1 => suggest_regions("", &opts.regions, &opts.product_regions, &[], &[]),
+            2 => suggest_attrs("", &[], &opts.product_attrs, &opts.attribute_values, &[]),
+            _ => [">", "<", ">=", "<="].iter().map(|op| crate::tui::semantic::SuggestionItem {
+                value: op.to_string(),
+                display: format!("{} (price operator)", op),
+                reason: "operator".to_string(),
+                is_semantic: false,
+                already_selected: false,
+            }).collect(),
+        };
+        self.suggestion_index = None;
+    }
+
+    /// Insert or replace the keyword at cursor position in raw_input.
+    #[cfg(feature = "raw_command")]
+    fn accept_raw_keyword(&mut self, kw_idx: usize) {
+        let kw = Self::RAW_KEYWORDS[kw_idx];
+        // Find if there's already a keyword token being typed before cursor
+        let text_before = &self.raw_input[..self.raw_cursor].to_string();
+        let last_token = text_before.split_whitespace().last().map(|s| s.to_string()).unwrap_or_default();
+        // Check if last token is a prefix of any keyword (to replace it)
+        let is_kw_prefix = Self::RAW_KEYWORDS.iter().any(|k| k.starts_with(last_token.as_str()) && !last_token.is_empty());
+        if is_kw_prefix {
+            let remove_start = self.raw_cursor - last_token.len();
+            self.raw_input.drain(remove_start..self.raw_cursor);
+            let insert = format!("{} ", kw);
+            for (i, ch) in insert.char_indices() {
+                self.raw_input.insert(remove_start + i, ch);
+            }
+            self.raw_cursor = remove_start + insert.len();
+        } else {
+            // Append keyword with leading space if needed
+            let needs_space = self.raw_cursor > 0
+                && !self.raw_input[..self.raw_cursor].ends_with(' ');
+            let insert = if needs_space { format!(" {} ", kw) } else { format!("{} ", kw) };
+            for (i, ch) in insert.char_indices() {
+                self.raw_input.insert(self.raw_cursor + i, ch);
+            }
+            self.raw_cursor += insert.len();
+        }
+        // Update params suggestions for this keyword
+        self.raw_cmd_index = kw_idx;
+        self.update_suggestions_for_cmd_index();
     }
 
     fn handle_key_builder_field(&mut self, key: KeyEvent) -> Result<PricingEvent> {
         match key.code {
-            // Up: move to Header when at top field, otherwise go to previous field
-            KeyCode::Up => {
-                if self.command_builder.selected_field == 0 {
-                    self.active_section = PricingSection::Header;
-                } else {
+            // Left/Right: move between parameter slots horizontally
+            KeyCode::Left => {
+                if self.command_builder.selected_field > 0 {
                     self.command_builder.selected_field -= 1;
                     self.command_builder.search_input.clear();
                     self.suggestion_index = None;
                     self.update_suggestions();
+                } else {
+                    return Ok(PricingEvent::PrevView);
                 }
             }
-            // Down: navigate to the next field, or to Results if at last field and results exist
-            KeyCode::Down => {
-                if self.command_builder.selected_field == 3 && !self.filtered_items.is_empty() {
-                    // At last field and have results, go to Results section
-                    self.active_section = PricingSection::Results;
-                } else {
-                    self.command_builder.selected_field =
-                        (self.command_builder.selected_field + 1) % 4;
+            KeyCode::Right => {
+                if self.command_builder.selected_field < 3 {
+                    self.command_builder.selected_field += 1;
                     self.command_builder.search_input.clear();
                     self.suggestion_index = None;
                     self.update_suggestions();
+                } else {
+                    return Ok(PricingEvent::NextView);
                 }
             }
-            // Right: enter suggestion browsing mode if suggestions exist
-            KeyCode::Right => {
+            // Up/Down: move between sections
+            KeyCode::Up => {
+                self.active_section = PricingSection::Header;
+            }
+            KeyCode::Down => {
+                // If suggestions are visible and there are items, move focus into suggestion panel
                 if !self.suggestions_cache.is_empty() {
                     self.builder_focus = BuilderFocus::Suggestions;
                     if self.suggestion_index.is_none() {
                         self.suggestion_index = Some(0);
                     }
+                } else if !self.filtered_items.is_empty() {
+                    self.active_section = PricingSection::Results;
                 }
             }
             // Enter: submit query to API
@@ -367,20 +848,35 @@ impl PricingView {
         let cols = self.suggestion_cols.get().max(1);
         let total = self.suggestions_cache.len();
         match key.code {
-            // Up/Down: navigate rows
+            // Up: navigate up, or return to field input if at top row
             KeyCode::Up => {
+                let at_top = self.suggestion_index.map(|i| i < cols).unwrap_or(true);
+                if at_top {
+                    self.builder_focus = BuilderFocus::Field;
+                    return Ok(PricingEvent::None);
+                }
                 if total > 0 {
-                    self.suggestion_index = Some(match self.suggestion_index {
-                        None | Some(0) => total - 1,
-                        Some(i) => i.saturating_sub(cols),
-                    });
+                    self.suggestion_index = Some(
+                        self.suggestion_index.map(|i| i.saturating_sub(cols)).unwrap_or(0)
+                    );
                 }
             }
+            // Down: navigate down, or go to results if at bottom
             KeyCode::Down => {
                 if total > 0 {
-                    let next = self.suggestion_index.map(|i| (i + cols).min(total - 1)).unwrap_or(0);
-                    self.suggestion_index = Some(next);
+                    let cur = self.suggestion_index.unwrap_or(0);
+                    let next = (cur + cols).min(total - 1);
+                    if next == cur {
+                        // Already at last row — go to results
+                        if !self.filtered_items.is_empty() {
+                            self.builder_focus = BuilderFocus::Field;
+                            self.active_section = PricingSection::Results;
+                        }
+                    } else {
+                        self.suggestion_index = Some(next);
+                    }
                 } else if !self.filtered_items.is_empty() {
+                    self.builder_focus = BuilderFocus::Field;
                     self.active_section = PricingSection::Results;
                 }
             }
@@ -406,12 +902,27 @@ impl PricingView {
             KeyCode::Char(' ') => {
                 if let Some(idx) = self.suggestion_index {
                     if idx < total {
+                        #[cfg(feature = "raw_command")]
+                        if self.command_mode == CommandMode::Raw {
+                            self.accept_raw_suggestion(idx);
+                            return Ok(PricingEvent::None);
+                        }
                         self.toggle_suggestion(idx);
                     }
                 }
             }
             // Enter: submit query
             KeyCode::Enter => {
+                #[cfg(feature = "raw_command")]
+                if self.command_mode == CommandMode::Raw {
+                    if let Some(idx) = self.suggestion_index {
+                        if idx < total {
+                            self.accept_raw_suggestion(idx);
+                            self.builder_focus = BuilderFocus::Field;
+                        }
+                    }
+                    return Ok(PricingEvent::None);
+                }
                 return Ok(PricingEvent::SubmitQuery);
             }
             _ => {}
@@ -451,82 +962,31 @@ impl PricingView {
             }
             self.command_builder.search_input.clear();
             self.update_suggestions();
+            // Keep cursor on the same item by finding it in the new list
+            self.suggestion_index = self.suggestions_cache
+                .iter()
+                .position(|s| s.value == value)
+                .or_else(|| {
+                    // Item may have been removed from list; stay at same index clamped
+                    self.suggestion_index.map(|i| i.min(self.suggestions_cache.len().saturating_sub(1)))
+                        .filter(|_| !self.suggestions_cache.is_empty())
+                });
             self.filter_items();
-            // After toggle, position cursor on the same value in the refreshed list
-            let new_idx = self.suggestions_cache.iter().position(|s| s.value == value);
-            self.suggestion_index = new_idx
-                .or_else(|| if self.suggestions_cache.is_empty() { None } else { Some(idx.min(self.suggestions_cache.len() - 1)) });
         }
     }
 
-    fn handle_key_raw(&mut self, key: KeyEvent) -> Result<PricingEvent> {
-        match key.code {
-            KeyCode::Up => {
-                if !self.suggestions_cache.is_empty() {
-                    self.suggestion_index = Some(match self.suggestion_index {
-                        None | Some(0) => self.suggestions_cache.len() - 1,
-                        Some(i) => i - 1,
-                    });
-                } else {
-                    self.active_section = PricingSection::Header;
-                }
-            }
-            KeyCode::Down => {
-                if !self.suggestions_cache.is_empty() {
-                    let next_idx = self.suggestion_index.map(|i| i + 1).unwrap_or(0);
-                    if next_idx >= self.suggestions_cache.len() {
-                        if !self.filtered_items.is_empty() {
-                            self.active_section = PricingSection::Results;
-                            self.suggestion_index = None;
-                        } else {
-                            self.suggestion_index = Some(0);
-                        }
-                    } else {
-                        self.suggestion_index = Some(next_idx);
-                    }
-                } else if !self.filtered_items.is_empty() {
-                    self.active_section = PricingSection::Results;
-                }
-            }
-            KeyCode::Enter => {
-                if let Some(idx) = self.suggestion_index {
-                    if idx < self.suggestions_cache.len() {
-                        self.apply_raw_suggestion(idx);
-                        self.suggestion_index = None;
-                        self.update_suggestions();
-                        self.filter_items();
-                    }
-                } else {
-                    return Ok(PricingEvent::SubmitQuery);
-                }
-            }
-            KeyCode::Char(c) => {
-                self.command_input.push(c);
-                self.suggestion_index = None;
-                self.update_suggestions();
-                self.filter_items();
-            }
-            KeyCode::Backspace | KeyCode::Delete => {
-                self.command_input.pop();
-                self.suggestion_index = None;
-                self.update_suggestions();
-                self.filter_items();
-            }
-            _ => {}
-        }
-        Ok(PricingEvent::None)
-    }
 
     fn handle_key_results(&mut self, key: KeyEvent) -> Result<PricingEvent> {
         match key.code {
             KeyCode::Up => {
-                // Move up within current page
+                // Move up within current page, or return to Command from top row
                 let page_start = self.results_page * self.results_per_page;
                 if self.selected > page_start {
                     self.selected -= 1;
-                } else if self.selected == page_start {
-                    // At top of current page, go back to Command
+                } else {
+                    // At top of page: go back to Command
                     self.active_section = PricingSection::Command;
+                    self.builder_focus = BuilderFocus::Field;
                     self.update_suggestions();
                 }
             }
@@ -542,14 +1002,14 @@ impl PricingView {
                 }
             }
             KeyCode::Char('j') => {
-                // j: 上一页 (as requested)
+                // j: previous page (intentionally inverted from vim convention)
                 if self.results_page > 0 {
                     self.results_page -= 1;
                     self.selected = self.results_page * self.results_per_page;
                 }
             }
             KeyCode::Char('k') => {
-                // k: 下一页 (as requested)
+                // k: next page (intentionally inverted from vim convention)
                 let total_pages = (self.filtered_items.len() + self.results_per_page - 1) / self.results_per_page;
                 if self.results_page + 1 < total_pages {
                     self.results_page += 1;
@@ -579,7 +1039,6 @@ impl PricingView {
                 }
             }
             KeyCode::Right => {
-                // Only scroll right if not all columns are already visible
                 let total = self.total_scrollable_cols.get();
                 let visible = self.visible_scrollable_cols.get();
                 if total > visible {
@@ -595,53 +1054,71 @@ impl PricingView {
         Ok(PricingEvent::None)
     }
 
-    // ── Raw-command helpers ───────────────────────────────────────────────────
-
-    /// Replace / append the currently-typed value with a selected suggestion.
-    fn apply_raw_suggestion(&mut self, idx: usize) {
-        let value = self.suggestions_cache[idx].value.clone();
-        if value.is_empty() {
-            return;
-        }
-        let tokens: Vec<String> = shlex::split(&self.command_input).unwrap_or_default();
-        let ends_with_space = self.command_input.ends_with(' ');
-
-        let mut active_kw: Option<String> = None;
-        let mut kw_index: Option<usize> = None;
-        for (i, token) in tokens.iter().enumerate().rev() {
-            let lower = token.to_lowercase();
-            if ["product", "region", "attrs"].contains(&lower.as_str()) {
-                active_kw = Some(lower);
-                kw_index = Some(i);
-                break;
-            }
-        }
-
-        match active_kw {
-            Some(_) => {
-                let base = tokens[..=kw_index.unwrap()].join(" ");
-                self.command_input = format!("{} {} ", base, value);
-            }
-            None => {
-                if tokens.is_empty() || ends_with_space {
-                    self.command_input = format!("{}{} ", self.command_input.trim_end(), value);
-                } else {
-                    let base = if tokens.len() > 1 {
-                        format!("{} ", tokens[..tokens.len() - 1].join(" "))
-                    } else {
-                        String::new()
-                    };
-                    self.command_input = format!("{}{} ", base, value);
-                }
-            }
-        }
-    }
 
     // ── Suggestion update ─────────────────────────────────────────────────────
 
     /// Rebuild `suggestions_cache` based on the current mode and input state.
     /// Must be called whenever the input changes or the active field changes.
     pub fn update_suggestions(&mut self) {
+        #[cfg(feature = "raw_command")]
+        if self.command_mode == CommandMode::Raw {
+            if self.raw_show_suggestions {
+                self.update_suggestions_raw();
+            }
+            return;
+        }
+        self.update_suggestions_builder();
+    }
+
+    #[cfg(feature = "raw_command")]
+    fn update_suggestions_raw(&mut self) {
+        let opts = match self.options.clone() {
+            Some(o) => o,
+            None => {
+                self.suggestions_cache.clear();
+                return;
+            }
+        };
+        let (field, token) = self.raw_active_field();
+        // Sync the command keyword highlight to match cursor position
+        self.raw_cmd_index = field;
+        self.suggestions_cache = match field {
+            0 => score_and_suggest_products(
+                &token,
+                &opts.products,
+                &opts.attribute_values,
+                &opts.product_groups,
+                &[],
+            ),
+            1 => suggest_regions(
+                &token,
+                &opts.regions,
+                &opts.product_regions,
+                &[],
+                &[],
+            ),
+            2 => suggest_attrs(
+                &token,
+                &[],
+                &opts.product_attrs,
+                &opts.attribute_values,
+                &[],
+            ),
+            _ => {
+                [">", "<", ">=", "<="].iter()
+                    .filter(|op| token.is_empty() || op.starts_with(token.as_str()))
+                    .map(|op| crate::tui::semantic::SuggestionItem {
+                        value: op.to_string(),
+                        display: format!("{} (price operator)", op),
+                        reason: "operator".to_string(),
+                        is_semantic: false,
+                        already_selected: false,
+                    }).collect()
+            }
+        };
+    }
+
+    fn update_suggestions_builder(&mut self) {
         let opts = match self.options.clone() {
             Some(o) => o,
             None => {
@@ -650,220 +1127,91 @@ impl PricingView {
             }
         };
 
-        match self.command_mode {
-            CommandMode::CommandBuilder => {
-                let q = self.command_builder.search_input.clone();
-                self.suggestions_cache = match self.command_builder.selected_field {
-                    0 => score_and_suggest_products(
-                        &q,
-                        &opts.products,
-                        &opts.attribute_values,
-                        &opts.product_groups,
-                        &self.command_builder.product_tags,
-                    ),
-                    1 => suggest_regions(
-                        &q,
-                        &opts.regions,
-                        &opts.product_regions,
-                        &self.command_builder.product_tags,
-                        &self.command_builder.region_tags,
-                    ),
-                    2 => {
-                        suggest_attrs(
-                            &q,
-                            &self.command_builder.product_tags,
-                            &opts.product_attrs,
-                            &opts.attribute_values,
-                            &self.command_builder.attribute_tags,
-                        )
-                    }
-                    _ => {
-                        // Suggest price operators
-                        [">", "<", ">=", "<="].iter()
-                            .filter(|op| q.is_empty() || op.starts_with(&q))
-                            .map(|op| crate::tui::semantic::SuggestionItem {
-                                value: op.to_string(),
-                                display: format!("{} (price operator)", op),
-                                reason: "operator".to_string(),
-                                is_semantic: false,
-                                already_selected: false,
-                            }).collect()
-                    }
-                };
+        let q = self.command_builder.search_input.clone();
+        self.suggestions_cache = match self.command_builder.selected_field {
+            0 => score_and_suggest_products(
+                &q,
+                &opts.products,
+                &opts.attribute_values,
+                &opts.product_groups,
+                &self.command_builder.product_tags,
+            ),
+            1 => suggest_regions(
+                &q,
+                &opts.regions,
+                &opts.product_regions,
+                &self.command_builder.product_tags,
+                &self.command_builder.region_tags,
+            ),
+            2 => suggest_attrs(
+                &q,
+                &self.command_builder.product_tags,
+                &opts.product_attrs,
+                &opts.attribute_values,
+                &self.command_builder.attribute_tags,
+            ),
+            _ => {
+                // Suggest price operators
+                [">", "<", ">=", "<="].iter()
+                    .filter(|op| q.is_empty() || op.starts_with(&q))
+                    .map(|op| crate::tui::semantic::SuggestionItem {
+                        value: op.to_string(),
+                        display: format!("{} (price operator)", op),
+                        reason: "operator".to_string(),
+                        is_semantic: false,
+                        already_selected: false,
+                    }).collect()
             }
-            CommandMode::RawCommand => {
-                let input = self.command_input.trim_end().to_string();
-                let tokens: Vec<String> = shlex::split(&input).unwrap_or_default();
-                let ends_with_space = self.command_input.ends_with(' ');
-
-                if tokens.is_empty() {
-                    self.suggestions_cache = ["product", "region", "attrs", "price"]
-                        .iter()
-                        .map(|k| SuggestionItem {
-                            value: k.to_string(),
-                            display: k.to_string(),
-                            reason: "keyword".to_string(),
-                            is_semantic: false,
-                            already_selected: false,
-                        })
-                        .collect();
-                    return;
-                }
-
-                // Find the most recent keyword in the token list
-                let mut active_kw: Option<String> = None;
-                let mut kw_index: Option<usize> = None;
-                for (i, token) in tokens.iter().enumerate().rev() {
-                    let lower = token.to_lowercase();
-                    if ["product", "region", "attrs", "price"].contains(&lower.as_str()) {
-                        active_kw = Some(lower);
-                        kw_index = Some(i);
-                        break;
-                    }
-                }
-
-                match active_kw {
-                    None => {
-                        // No keyword found — suggest keyword completions
-                        let last = if ends_with_space {
-                            ""
-                        } else {
-                            tokens.last().map(String::as_str).unwrap_or("")
-                        };
-                        self.suggestions_cache = ["product", "region", "attrs", "price"]
-                            .iter()
-                            .filter(|k| last.is_empty() || k.starts_with(last))
-                            .map(|k| SuggestionItem {
-                                value: k.to_string(),
-                                display: k.to_string(),
-                                reason: "keyword".to_string(),
-                                is_semantic: false,
-                                already_selected: false,
-                            })
-                            .collect();
-                    }
-                    Some(kw) => {
-                        let idx = kw_index.unwrap();
-                        // Value query: tokens after the keyword (if any) and not ending with space
-                        let value_query = if ends_with_space || tokens.len() <= idx + 1 {
-                            String::new()
-                        } else {
-                            tokens[idx + 1..].join(" ").to_lowercase()
-                        };
-
-                        // Collect already-selected values for this keyword occurrence
-                        let mut selected_vals: Vec<String> = Vec::new();
-                        let mut i = 0;
-                        while i + 1 < tokens.len() {
-                            if tokens[i].to_lowercase() == kw {
-                                for v in tokens[i + 1].split(',') {
-                                    if !v.is_empty() {
-                                        selected_vals.push(v.to_string());
-                                    }
-                                }
-                            }
-                            i += 1;
-                        }
-
-                        // Context for RawCommand: parse all tokens to find current selections
-                        let mut prod_tags: Vec<String> = Vec::new();
-                        let mut j = 0;
-                        while j + 1 < tokens.len() {
-                            let tk = tokens[j].to_lowercase();
-                            if tk == "product" { prod_tags.push(tokens[j + 1].clone()); }
-                            j += 1;
-                        }
-
-                        self.suggestions_cache = match kw.as_str() {
-                            "product" => score_and_suggest_products(
-                                &value_query,
-                                &opts.products,
-                                &opts.attribute_values,
-                                &opts.product_groups,
-                                &selected_vals,
-                            ),
-                            "region" => {
-                                suggest_regions(
-                                    &value_query,
-                                    &opts.regions,
-                                    &opts.product_regions,
-                                    &prod_tags,
-                                    &selected_vals,
-                                )
-                            }
-                            "attrs" => {
-                                suggest_attrs(
-                                    &value_query,
-                                    &prod_tags,
-                                    &opts.product_attrs,
-                                    &opts.attribute_values,
-                                    &selected_vals,
-                                )
-                            }
-                            "price" => {
-                                // Suggest price operators for raw command
-                                [">", "<", ">=", "<="].iter()
-                                    .filter(|op| value_query.is_empty() || op.starts_with(&value_query))
-                                    .map(|op| crate::tui::semantic::SuggestionItem {
-                                        value: op.to_string(),
-                                        display: format!("{} (price operator)", op),
-                                        reason: "operator".to_string(),
-                                        is_semantic: false,
-                                        already_selected: false,
-                                    }).collect()
-                            }
-                            _ => Vec::new(),
-                        };
-                    }
-                }
-            }
-        }
+        };
     }
 
     // ── Rendering ────────────────────────────────────────────────────────────
 
-    pub fn render(&self, f: &mut Frame, active: bool) {
-        let area = f.area();
+    pub fn render(&self, f: &mut Frame, area: Rect, active: bool) {
+        // Suggestions panel: show when command section is active
+        #[cfg(feature = "raw_command")]
+        let show_suggestions = match self.command_mode {
+            CommandMode::Builder => active && self.active_section == PricingSection::Command,
+            CommandMode::Raw => self.raw_show_suggestions,
+        };
+        #[cfg(not(feature = "raw_command"))]
+        let show_suggestions = active && self.active_section == PricingSection::Command;
+        let suggestion_h: u16 = if show_suggestions { 8 } else { 0 };
 
-        // Compute price details height dynamically based on selected item
-        let price_count = self.filtered_items.get(self.selected)
-            .map(|item| item.prices.len())
-            .unwrap_or(0);
-        // Two columns, so rows needed = ceil(count / 2), plus 3 for borders + header
-        let details_h: u16 = if price_count == 0 {
-            4
+        // Price details height: enough rows for all models split across 2 columns,
+        // plus borders(2) + header(1) = 3 overhead per column.
+        let price_detail_h: u16 = if let Some(item) = self.filtered_items.get(self.selected) {
+            let models = item.prices.len();
+            if models == 0 {
+                3 // just the empty box
+            } else {
+                let rows_per_col = (models + 1) / 2; // ceil(models/2)
+                (rows_per_col as u16 + 3).max(5).min(20) // 3 overhead, min 5, max 20
+            }
         } else {
-            (((price_count + 1) / 2) as u16 + 3).max(4)
+            3
         };
 
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints(vec![
-                Constraint::Length(3),                      // Header
-                Constraint::Length(10),                     // Command + Suggestions
-                Constraint::Min(3),                         // Results table
-                Constraint::Length(details_h),              // Price details
-                Constraint::Length(3),                      // Help bar
+            .constraints([
+                Constraint::Length(3),              // Header
+                Constraint::Length(3),              // Command bar (full width, single line)
+                Constraint::Length(suggestion_h),   // Suggestions (full width, below command)
+                Constraint::Min(6),                 // Results
+                Constraint::Length(price_detail_h), // Price details (dynamic)
+                Constraint::Length(3),              // Help
             ])
             .split(area);
 
-        let mid_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints(vec![
-                Constraint::Percentage(50), // Left: Command (Raw or Builder)
-                Constraint::Percentage(50), // Right: Suggestions
-            ])
-            .split(main_chunks[1]);
-
         self.render_header(f, main_chunks[0], active);
-        match self.command_mode {
-            CommandMode::RawCommand => self.render_raw_command(f, mid_chunks[0], active),
-            CommandMode::CommandBuilder => self.render_builder_command(f, mid_chunks[0], active),
+        self.render_command(f, main_chunks[1], active);
+        if show_suggestions {
+            self.render_suggestions(f, main_chunks[2], active);
         }
-        self.render_suggestions(f, mid_chunks[1], active);
-        self.render_results(f, main_chunks[2], active);
-        self.render_price_details(f, main_chunks[3]);
-        self.render_help(f, main_chunks[4], active);
+        self.render_results(f, main_chunks[3], active);
+        self.render_price_details(f, main_chunks[4]);
+        self.render_help(f, main_chunks[5], active);
     }
 
     fn render_header(&self, f: &mut Frame, area: Rect, active: bool) {
@@ -933,234 +1281,149 @@ impl PricingView {
         );
     }
 
-    /// Raw command: single-line input with keyword/value colour coding.
-    fn render_raw_command(&self, f: &mut Frame, area: Rect, active: bool) {
-        let is_focused = active && self.active_section == PricingSection::Command;
+    /// Full-width horizontal command bar.
+    /// Builder mode: shows 4 field slots inline with tags + cursor.
+    /// Raw mode: shows a single text input box.
+    fn render_command(&self, f: &mut Frame, area: Rect, active: bool) {
+        let cmd_active = active && self.active_section == PricingSection::Command;
+        let is_focused = cmd_active && self.builder_focus == BuilderFocus::Field;
+
         let border_type = if is_focused { BorderType::Thick } else { BorderType::Plain };
-        let border_color = if is_focused { Color::Yellow } else { Color::DarkGray };
-        let title_style = if is_focused {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        let border_color = if is_focused { Color::Green } else if cmd_active { Color::Cyan } else { Color::DarkGray };
+        let title_style = if cmd_active {
+            Style::default().fg(if is_focused { Color::Green } else { Color::Cyan }).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
 
-        const KEYWORDS: &[&str] = &["provider", "region", "product", "attrs", "price"];
+        let mode_label = " Pricing Query ";
+        #[cfg(feature = "raw_command")]
+        let mode_label = match self.command_mode {
+            CommandMode::Builder => " Pricing Query ",
+            CommandMode::Raw => " Raw Command ",
+        };
 
-        let content = if self.command_input.is_empty() {
-            vec![Line::from(vec![
-                Span::styled("> ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    "type: provider aws  region us-east-1  product ec2...",
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::ITALIC),
-                ),
-            ])]
-        } else {
-            let tokens: Vec<String> =
-                shlex::split(&self.command_input).unwrap_or_default();
-            let ends_with_space = self.command_input.ends_with(' ');
+        let title = {
+            let spans = vec![
+                Span::styled(if cmd_active { " > " } else { "   " }, title_style),
+                Span::styled(mode_label, title_style),
+            ];
+            // F1 hint only shown when raw_command feature is enabled
+            #[cfg(feature = "raw_command")]
+            let mut spans = spans;
+            #[cfg(feature = "raw_command")]
+            spans.push(Span::styled(" [F1 Switch] ", Style::default().fg(Color::DarkGray)));
+            Line::from(spans)
+        };
 
-            let mut spans: Vec<Span> =
-                vec![Span::styled("> ", Style::default().fg(Color::DarkGray))];
+        // Builder content line
+        let builder_line = {
+            let mut spans = Vec::new();
+            for i in 0..4usize {
+                let field_name = match i {
+                    0 => "products",
+                    1 => "regions",
+                    2 => "specs",
+                    _ => "price",
+                };
+                let tags = match i {
+                    0 => &self.command_builder.product_tags,
+                    1 => &self.command_builder.region_tags,
+                    2 => &self.command_builder.attribute_tags,
+                    _ => &self.command_builder.price_tags,
+                };
+                let is_sel = is_focused && i == self.command_builder.selected_field;
 
-            for (i, token) in tokens.iter().enumerate() {
-                let is_last = i == tokens.len() - 1;
-                let lower = token.to_lowercase();
+                spans.push(Span::styled(
+                    format!("{} ", field_name),
+                    if is_sel {
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    } else if !tags.is_empty() {
+                        Style::default().fg(Color::Cyan)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ));
 
-                if KEYWORDS.contains(&lower.as_str()) {
-                    // Keywords: bold cyan
-                    spans.push(Span::styled(
-                        token.clone(),
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                    ));
-                } else {
-                    // Values: green (comma-separated multi-values still one span)
-                    spans.push(Span::styled(
-                        token.clone(),
-                        Style::default().fg(Color::Green),
-                    ));
-                }
-
-                if !is_last || ends_with_space {
+                for t in tags {
+                    spans.push(Span::styled(format!("[{}]", t), Style::default().fg(Color::Green)));
                     spans.push(Span::raw(" "));
                 }
-            }
-            // Blinking cursor indicator
-            spans.push(Span::styled("|", Style::default().fg(Color::Cyan)));
 
-            vec![Line::from(spans)]
-        };
+                if is_sel {
+                    if !self.command_builder.search_input.is_empty() {
+                        spans.push(Span::styled(&self.command_builder.search_input, Style::default().fg(Color::White)));
+                    }
+                    spans.push(Span::styled("▌", Style::default().fg(Color::Cyan)));
+                }
 
-        f.render_widget(
-            Paragraph::new(content).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(border_type)
-                    .title(Line::from(vec![
-                        Span::styled(if is_focused { " > " } else { "   " }, title_style),
-                        Span::styled(" Command [Raw]  F1=Builder ", title_style),
-                    ]))
-                    .border_style(Style::default().fg(border_color)),
-            ),
-            area,
-        );
-    }
-
-    /// Builder: vertical layout — one row per field showing tag chips + search input.
-    fn render_builder_command(&self, f: &mut Frame, area: Rect, active: bool) {
-        let is_focused = active && self.active_section == PricingSection::Command 
-            && self.builder_focus == BuilderFocus::Field;
-        let border_type = if is_focused { BorderType::Thick } else { BorderType::Plain };
-        let border_color = if is_focused { Color::Green } else { Color::DarkGray };
-        let title_style = if is_focused {
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-
-        let mut lines: Vec<Line> = Vec::new();
-        for field_idx in 0..4usize {
-            let field_name = Self::field_name(field_idx);
-            let is_active_field =
-                field_idx == self.command_builder.selected_field && is_focused;
-
-            let indicator =
-                if is_active_field { "> " } else { "  " };
-            let label_style = if is_active_field {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            let tag_style = if is_active_field {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White).bg(Color::DarkGray)
-            };
-
-            let tags: &Vec<String> = match field_idx {
-                0 => &self.command_builder.product_tags,
-                1 => &self.command_builder.region_tags,
-                2 => &self.command_builder.attribute_tags,
-                _ => &self.command_builder.price_tags,
-            };
-
-            let mut spans: Vec<Span> = vec![
-                Span::styled(
-                    indicator,
-                    Style::default().fg(if is_active_field {
-                        Color::Green
-                    } else {
-                        Color::DarkGray
-                    }),
-                ),
-                Span::styled(format!("{:16}", field_name), label_style),
-                Span::styled(": ", Style::default().fg(Color::DarkGray)),
-            ];
-
-            // Render selected tags as chips: [value] (no × — remove with Backspace)
-            for tag in tags.iter() {
-                spans.push(Span::styled(format!(" {} ", tag), tag_style));
-                spans.push(Span::raw(" "));
-            }
-
-            // Search buffer and hint on the active field
-            if is_active_field {
-                if self.command_builder.search_input.is_empty() {
-                    let hint = if tags.is_empty() {
-                        "(→ browse · Enter submit · type to search)"
-                    } else {
-                        "(→ browse · ⌫ remove last · Del clear all)"
-                    };
-                    spans.push(Span::styled(
-                        hint,
-                        Style::default()
-                            .fg(Color::DarkGray)
-                            .add_modifier(Modifier::ITALIC),
-                    ));
-                } else {
-                    spans.push(Span::styled(
-                        self.command_builder.search_input.clone(),
-                        Style::default().fg(Color::White),
-                    ));
-                    spans.push(Span::styled(
-                        "|",
-                        Style::default().fg(Color::Cyan),
-                    ));
+                if i < 3 {
+                    spans.push(Span::styled("  │  ", Style::default().fg(Color::DarkGray)));
                 }
             }
+            Line::from(spans)
+        };
 
-            lines.push(Line::from(spans));
-        }
+        #[cfg(feature = "raw_command")]
+        let content_line = match self.command_mode {
+            CommandMode::Builder => builder_line,
+            CommandMode::Raw => {
+                if self.raw_input.is_empty() && !is_focused {
+                    Line::from(vec![
+                        Span::styled("$ ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            "products <name> regions <region> specs <key=val> price <op><val>  · comma separates multiple values · Tab for suggestions",
+                            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                        ),
+                    ])
+                } else {
+                    let mut spans: Vec<Span> = vec![
+                        Span::styled("$ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    ];
+                    let input = &self.raw_input;
+                    let cursor = self.raw_cursor;
+                    let kws: &[&str] = &Self::RAW_KEYWORDS;
+                    let mut i = 0usize;
+                    let mut cursor_inserted = false;
+                    while i < input.len() {
+                        if i == cursor && is_focused {
+                            spans.push(Span::styled("▌", Style::default().fg(Color::Cyan)));
+                            cursor_inserted = true;
+                        }
+                        let mut matched_kw: Option<&str> = None;
+                        for kw in kws {
+                            if input[i..].starts_with(kw) {
+                                let after = i + kw.len();
+                                let preceded_ok = i == 0 || input.as_bytes()[i - 1].is_ascii_whitespace();
+                                let followed_ok = after >= input.len() || input.as_bytes()[after].is_ascii_whitespace();
+                                if preceded_ok && followed_ok {
+                                    matched_kw = Some(kw);
+                                    break;
+                                }
+                            }
+                        }
+                        if let Some(kw) = matched_kw {
+                            spans.push(Span::styled(kw.to_string(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+                            i += kw.len();
+                        } else {
+                            let ch = input[i..].chars().next().unwrap();
+                            let style = if input.as_bytes()[i].is_ascii_whitespace() { Style::default() } else { Style::default().fg(Color::White) };
+                            spans.push(Span::styled(ch.to_string(), style));
+                            i += ch.len_utf8();
+                        }
+                    }
+                    if !cursor_inserted && is_focused {
+                        spans.push(Span::styled("▌", Style::default().fg(Color::Cyan)));
+                    }
+                    Line::from(spans)
+                }
+            }
+        };
+        #[cfg(not(feature = "raw_command"))]
+        let content_line = builder_line;
 
         f.render_widget(
-            Paragraph::new(lines).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(border_type)
-                    .title(Line::from(vec![
-                        Span::styled(if is_focused { " > " } else { "   " }, title_style),
-                        Span::styled(" Command [Builder]  F1=Raw ", title_style),
-                    ]))
-                    .border_style(Style::default().fg(border_color)),
-            ),
-            area,
-        );
-    }
-
-    /// Navigable suggestion list with semantic / fuzzy grouping by colour.
-    fn render_suggestions(&self, f: &mut Frame, area: Rect, active: bool) {
-        let cmd_active = active && self.active_section == PricingSection::Command;
-        let suggestion_focused = cmd_active
-            && self.command_mode == CommandMode::CommandBuilder
-            && self.builder_focus == BuilderFocus::Suggestions;
-
-        let title = match self.command_mode {
-            CommandMode::CommandBuilder => {
-                let hint = if cmd_active && self.builder_focus == BuilderFocus::Field {
-                    "  [→ browse]"
-                } else if cmd_active && self.builder_focus == BuilderFocus::Suggestions {
-                    "  [← back · Space select]"
-                } else {
-                    ""
-                };
-                format!(
-                    " {} Suggestions ({}){}",
-                    Self::field_name(self.command_builder.selected_field),
-                    self.suggestions_cache.len(),
-                    hint,
-                )
-            }
-            CommandMode::RawCommand => {
-                format!(" Suggestions ({}) ", self.suggestions_cache.len())
-            }
-        };
-
-        let border_type = if suggestion_focused { BorderType::Thick } else { BorderType::Plain };
-        let border_color = if suggestion_focused {
-            Color::Green
-        } else if cmd_active {
-            Color::Cyan
-        } else {
-            Color::DarkGray
-        };
-
-        if self.suggestions_cache.is_empty() {
-            let msg = if self.options.is_none() {
-                "(Sync metadata to see suggestions)"
-            } else {
-                "(No matches)"
-            };
-            f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    msg,
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::ITALIC),
-                )))
+            Paragraph::new(content_line)
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
@@ -1168,52 +1431,209 @@ impl PricingView {
                         .title(title)
                         .border_style(Style::default().fg(border_color)),
                 ),
-                area,
+            area,
+        );
+    }
+
+
+    /// Full-width suggestion panel.
+    /// Builder mode: field tabs in title + multi-column params list.
+    /// Raw mode: left column = command keywords, right column = params list.
+    fn render_suggestions(&self, f: &mut Frame, area: Rect, active: bool) {
+        let cmd_active = active && self.active_section == PricingSection::Command;
+        let suggestion_focused = cmd_active && self.builder_focus == BuilderFocus::Suggestions;
+
+        let border_type = if suggestion_focused { BorderType::Thick } else { BorderType::Plain };
+        let border_color = if suggestion_focused { Color::Green } else if cmd_active { Color::Cyan } else { Color::DarkGray };
+
+        #[cfg(feature = "raw_command")]
+        if self.command_mode == CommandMode::Raw {
+            self.render_suggestions_raw(f, area, cmd_active, suggestion_focused, border_type, border_color);
+            return;
+        }
+        self.render_suggestions_builder(f, area, cmd_active, suggestion_focused, border_type, border_color);
+    }
+
+    #[cfg(feature = "raw_command")]
+    fn render_suggestions_raw(
+        &self, f: &mut Frame, area: Rect,
+        _cmd_active: bool, suggestion_focused: bool,
+        border_type: BorderType, border_color: Color,
+    ) {
+        let hint = if suggestion_focused {
+            "[↑↓ Navigate · ←→ Switch · Enter Accept · Esc Close]"
+        } else {
+            "[Tab Open · ↓ Browse]"
+        };
+        let title = Line::from(vec![
+            Span::styled(" commands ", Style::default().fg(Color::DarkGray)),
+            Span::styled("│", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!(" params ({}) ", self.suggestions_cache.len()),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(hint, Style::default().fg(Color::DarkGray)),
+        ]);
+
+        // Split area into left (commands) and right (params)
+        let inner = Block::default()
+            .borders(Borders::ALL)
+            .border_type(border_type)
+            .title(title)
+            .border_style(Style::default().fg(border_color));
+        let inner_area = inner.inner(area);
+        f.render_widget(inner, area);
+
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(14), Constraint::Min(1)])
+            .split(inner_area);
+
+        // ── Left: command keywords ──
+        let kw_names = ["products", "regions", "specs", "price"];
+        let kw_lines: Vec<Line> = kw_names.iter().enumerate().map(|(i, name)| {
+            let is_active = i == self.raw_cmd_index;
+            let focused_cmd = suggestion_focused && !self.raw_param_focus;
+            if is_active && focused_cmd {
+                Line::from(Span::styled(
+                    format!("> {}", name),
+                    Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ))
+            } else if is_active {
+                Line::from(Span::styled(
+                    format!("  {}", name),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                Line::from(Span::styled(
+                    format!("  {}", name),
+                    Style::default().fg(Color::DarkGray),
+                ))
+            }
+        }).collect();
+        f.render_widget(Paragraph::new(kw_lines), cols[0]);
+
+        // ── Right: params suggestions ──
+        if self.suggestions_cache.is_empty() {
+            let msg = if self.options.is_none() { "(sync metadata first)" } else { "(no matches)" };
+            f.render_widget(
+                Paragraph::new(Span::styled(msg, Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC))),
+                cols[1],
             );
             return;
         }
 
-        // Multi-column layout: calculate how many columns fit
-        let inner_w = area.width.saturating_sub(2) as usize; // minus borders
-        let inner_h = area.height.saturating_sub(2).max(1) as usize;
+        let inner_w = cols[1].width as usize;
+        let inner_h = cols[1].height as usize;
+        let max_display = self.suggestions_cache.iter().map(|s| s.display.len()).max().unwrap_or(10);
+        let max_reason = self.suggestions_cache.iter().map(|s| s.reason.len()).max().unwrap_or(0);
+        let cell_w = (4 + max_display + if max_reason > 0 { 2 + max_reason } else { 0 }).clamp(16, 36);
+        let num_cols = (inner_w / cell_w).max(1);
+        self.suggestion_cols.set(num_cols);
 
-        // Each cell: display + reason, min width 20, max 40
+        let sel_idx = self.suggestion_index.unwrap_or(0);
+        let sel_row = sel_idx / num_cols;
+        let scroll_row = if sel_row >= inner_h { sel_row - inner_h + 1 } else { 0 };
+
+        let focused_params = suggestion_focused && self.raw_param_focus;
+        let mut lines: Vec<Line> = Vec::new();
+        for row in scroll_row..(scroll_row + inner_h) {
+            let mut spans: Vec<Span> = Vec::new();
+            for col in 0..num_cols {
+                let i = row * num_cols + col;
+                if i >= self.suggestions_cache.len() { break; }
+                let item = &self.suggestions_cache[i];
+                let is_sel = focused_params && self.suggestion_index == Some(i);
+
+                let (item_style, reason_style, check) = if is_sel {
+                    (Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
+                     Style::default().fg(Color::Black).bg(Color::Cyan), ">")
+                } else if item.is_semantic {
+                    (Style::default().fg(Color::Yellow), Style::default().fg(Color::DarkGray), " ")
+                } else {
+                    (Style::default().fg(Color::Gray), Style::default().fg(Color::DarkGray), " ")
+                };
+
+                let display_str = format!("{} {}", check, item.display);
+                let reason_str = if !item.reason.is_empty() { format!(" {}", item.reason) } else { String::new() };
+                let pad = cell_w.saturating_sub(display_str.len() + reason_str.len());
+                spans.push(Span::styled(display_str, item_style));
+                if !reason_str.is_empty() { spans.push(Span::styled(reason_str, reason_style)); }
+                spans.push(Span::raw(" ".repeat(pad.max(1))));
+            }
+            if !spans.is_empty() { lines.push(Line::from(spans)); }
+        }
+        f.render_widget(Paragraph::new(lines), cols[1]);
+    }
+
+    fn render_suggestions_builder(
+        &self, f: &mut Frame, area: Rect,
+        cmd_active: bool, suggestion_focused: bool,
+        border_type: BorderType, border_color: Color,
+    ) {
+        let title: Line = {
+            let mut spans = vec![Span::styled(" ", Style::default())];
+            for i in 0..4usize {
+                let name = match i { 0 => "products", 1 => "regions", 2 => "specs", _ => "price" };
+                let is_active_field = i == self.command_builder.selected_field;
+                if is_active_field {
+                    spans.push(Span::styled(
+                        format!(" {} ", name),
+                        Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    ));
+                } else {
+                    spans.push(Span::styled(format!(" {} ", name), Style::default().fg(Color::DarkGray)));
+                }
+                if i < 3 { spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray))); }
+            }
+            spans.push(Span::styled(format!("  ({}) ", self.suggestions_cache.len()), Style::default().fg(Color::DarkGray)));
+            if suggestion_focused {
+                spans.push(Span::styled("[↑ Back · Space Select]", Style::default().fg(Color::DarkGray)));
+            } else if cmd_active {
+                spans.push(Span::styled("[Tab Complete · ↓ Browse]", Style::default().fg(Color::DarkGray)));
+            }
+            Line::from(spans)
+        };
+
+        let items_area = area;
+
+        if self.suggestions_cache.is_empty() {
+            let msg = if self.options.is_none() { "(Sync metadata to see suggestions)" } else { "(No matches)" };
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(msg, Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC))))
+                    .block(Block::default().borders(Borders::ALL).border_type(border_type).title(title).border_style(Style::default().fg(border_color))),
+                items_area,
+            );
+            return;
+        }
+
+        let inner_w = items_area.width.saturating_sub(2) as usize;
+        let inner_h = items_area.height.saturating_sub(2).max(1) as usize;
         let max_display = self.suggestions_cache.iter().map(|s| s.display.len()).max().unwrap_or(10);
         let max_reason = self.suggestions_cache.iter().map(|s| s.reason.len()).max().unwrap_or(0);
         let cell_w = (4 + max_display + if max_reason > 0 { 2 + max_reason } else { 0 }).clamp(18, 38);
         let num_cols = (inner_w / cell_w).max(1);
         self.suggestion_cols.set(num_cols);
-        let num_rows = inner_h;
 
-        // Determine scroll: keep selected item visible
         let sel_idx = self.suggestion_index.unwrap_or(0);
         let sel_row = sel_idx / num_cols;
-        let scroll_row = if sel_row >= num_rows { sel_row - num_rows + 1 } else { 0 };
+        let scroll_row = if sel_row >= inner_h { sel_row - inner_h + 1 } else { 0 };
 
         let mut lines: Vec<Line> = Vec::new();
-        for row in scroll_row..(scroll_row + num_rows) {
+        for row in scroll_row..(scroll_row + inner_h) {
             let mut spans: Vec<Span> = Vec::new();
             for col in 0..num_cols {
                 let i = row * num_cols + col;
-                if i >= self.suggestions_cache.len() {
-                    break;
-                }
+                if i >= self.suggestions_cache.len() { break; }
                 let item = &self.suggestions_cache[i];
                 let is_sel = self.suggestion_index == Some(i);
 
                 let (item_style, reason_style, check) = if is_sel && item.already_selected {
-                    // Cursor on a selected item: cyan bg + checkmark
-                    (
-                        Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD),
-                        Style::default().fg(Color::Black).bg(Color::Green),
-                        "✓",
-                    )
+                    (Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD),
+                     Style::default().fg(Color::Black).bg(Color::Green), "✓")
                 } else if is_sel {
-                    (
-                        Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
-                        Style::default().fg(Color::Black).bg(Color::Cyan),
-                        ">",
-                    )
+                    (Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
+                     Style::default().fg(Color::Black).bg(Color::Cyan), ">")
                 } else if item.already_selected {
                     (Style::default().fg(Color::Green), Style::default().fg(Color::DarkGray), "✓")
                 } else if item.is_semantic {
@@ -1222,37 +1642,21 @@ impl PricingView {
                     (Style::default().fg(Color::Gray), Style::default().fg(Color::DarkGray), " ")
                 };
 
-                // Build cell content: [check] display [reason]
                 let display_str = format!("{} {}", check, item.display);
-                let reason_str = if !item.reason.is_empty() {
-                    format!(" {}", item.reason)
-                } else {
-                    String::new()
-                };
-                // Pad cell to cell_w
-                let content_len = display_str.len() + reason_str.len();
-                let pad = cell_w.saturating_sub(content_len);
-
+                let reason_str = if !item.reason.is_empty() { format!(" {}", item.reason) } else { String::new() };
+                let pad = cell_w.saturating_sub(display_str.len() + reason_str.len());
                 spans.push(Span::styled(display_str, item_style));
-                if !reason_str.is_empty() {
-                    spans.push(Span::styled(reason_str, reason_style));
-                }
+                if !reason_str.is_empty() { spans.push(Span::styled(reason_str, reason_style)); }
                 spans.push(Span::raw(" ".repeat(pad.max(1))));
             }
-            if !spans.is_empty() {
-                lines.push(Line::from(spans));
-            }
+            if !spans.is_empty() { lines.push(Line::from(spans)); }
         }
 
         f.render_widget(
             Paragraph::new(lines).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(border_type)
-                    .title(title)
-                    .border_style(Style::default().fg(border_color)),
+                Block::default().borders(Borders::ALL).border_type(border_type).title(title).border_style(Style::default().fg(border_color)),
             ),
-            area,
+            items_area,
         );
     }
 
@@ -1262,6 +1666,17 @@ impl PricingView {
             "-"
         } else {
             s
+        }
+    }
+
+    fn normalize_price(s: &str) -> String {
+        let trimmed = s.trim();
+        if trimmed.eq_ignore_ascii_case("na") || trimmed.eq_ignore_ascii_case("n/a")
+            || trimmed == "-" || trimmed.is_empty()
+        {
+            "0.0".to_string()
+        } else {
+            trimmed.to_string()
         }
     }
 
@@ -1496,11 +1911,11 @@ impl PricingView {
                     } else if i == scrollable_headers.len() - 2 {
                         // Min Price
                         let v = item.min_price.clone().unwrap_or_else(|| "-".to_string());
-                        cells.push(Cell::from(Self::normalize_na(&v).to_string()));
+                        cells.push(Cell::from(Self::normalize_price(&v)));
                     } else {
                         // Max Price
                         let v = item.max_price.clone().unwrap_or_else(|| "-".to_string());
-                        cells.push(Cell::from(Self::normalize_na(&v).to_string()));
+                        cells.push(Cell::from(Self::normalize_price(&v)));
                     }
                 }
                 
@@ -1538,13 +1953,32 @@ impl PricingView {
                             let mut spans = vec![
                                 Span::styled(if is_focused { " > " } else { "   " }, title_style),
                                 Span::styled(
-                                    format!(" Results ({} total, page {}/{}) ", 
-                                        self.filtered_items.len(), 
-                                        self.results_page + 1, 
+                                    format!(" Results ({} total, page {}/{}) ",
+                                        self.filtered_items.len(),
+                                        self.results_page + 1,
                                         total_pages.max(1)),
                                     title_style,
                                 ),
                             ];
+                            // Provider counts
+                            let mut provider_counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+                            for item in &self.filtered_items {
+                                let provider = item.product.split_whitespace().next().unwrap_or(&item.product).to_string();
+                                *provider_counts.entry(provider).or_insert(0) += 1;
+                            }
+                            if !provider_counts.is_empty() {
+                                spans.push(Span::styled("[ ", Style::default().fg(Color::DarkGray)));
+                                for (i, (provider, count)) in provider_counts.iter().enumerate() {
+                                    if i > 0 {
+                                        spans.push(Span::styled("  ", Style::default()));
+                                    }
+                                    spans.push(Span::styled(
+                                        format!("{}: {}", provider, count),
+                                        Style::default().fg(Color::Cyan),
+                                    ));
+                                }
+                                spans.push(Span::styled(" ]", Style::default().fg(Color::DarkGray)));
+                            }
                             if !all_columns_fit {
                                 spans.push(Span::styled(
                                     format!(" ←→ col {}/{} ", h_offset + 1, scrollable_headers.len()),
@@ -1696,13 +2130,13 @@ impl PricingView {
             .split(area);
 
         let visible_rows = cols[0].height.saturating_sub(3) as usize; // borders(2) + header(1)
-        // Left gets first half, right gets the rest
-        let (left_prices, right_prices) = if item.prices.len() <= visible_rows {
-            (item.prices.as_slice(), &[] as &[PriceInfo])
+        // Split evenly across two columns
+        let split = if item.prices.len() <= visible_rows {
+            item.prices.len() // all fit in left, right empty
         } else {
-            let split = ((item.prices.len() + 1) / 2).max(1);
-            (&item.prices[..split], &item.prices[split..])
+            (item.prices.len() + 1) / 2 // ceil half
         };
+        let (left_prices, right_prices) = (&item.prices[..split], &item.prices[split..]);
 
         let title = Line::from(vec![
             Span::styled(" > Price Details - ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
@@ -1720,7 +2154,14 @@ impl PricingView {
         let unit_w = all_prices.iter().map(|p| p.unit.len()).max().unwrap_or(4).max(4) as u16 + 2;
         let upfront_w = all_prices.iter().map(|p| p.upfront_fee.len()).max().unwrap_or(7).max(7) as u16 + 2;
         let year_w: u16 = 4;
-        let option_w = all_prices.iter().map(|p| p.purchase_option.len()).max().unwrap_or(6).max(6) as u16 + 2;
+        let option_w = all_prices.iter().map(|p| {
+            let base = p.purchase_option.len();
+            let interrupt = p.interruption_max_pct.as_deref().map(|pct| {
+                if p.purchase_option.is_empty() { format!("Interrupt {}%", pct).len() }
+                else { format!("{} Interrupt {}%", p.purchase_option, pct).len() }
+            }).unwrap_or(0);
+            base.max(interrupt)
+        }).max().unwrap_or(6).max(6) as u16 + 2;
 
         let make_table = |prices: &[PriceInfo]| -> Table {
             let header_cells = vec![
@@ -1739,13 +2180,24 @@ impl PricingView {
                 } else {
                     Style::default().fg(Color::White)
                 };
+                let option_cell = match p.interruption_max_pct.as_deref() {
+                    Some(pct) => {
+                        let text = if p.purchase_option.is_empty() {
+                            format!("Interrupt {}%", pct)
+                        } else {
+                            format!("{} Interrupt {}%", p.purchase_option, pct)
+                        };
+                        Cell::from(text).style(Style::default().fg(Color::Yellow))
+                    }
+                    None => Cell::from(if p.purchase_option.is_empty() { "-".to_string() } else { p.purchase_option.clone() }),
+                };
                 Row::new(vec![
                     Cell::from(p.pricing_model.clone()),
                     Cell::from(p.price.clone()).style(Style::default().fg(Color::Green)),
                     Cell::from(p.unit.clone()),
                     Cell::from(if p.upfront_fee.is_empty() || p.upfront_fee == "0" { "-".to_string() } else { p.upfront_fee.clone() }),
                     Cell::from(if p.year.is_empty() { "-".to_string() } else { p.year.clone() }),
-                    Cell::from(if p.purchase_option.is_empty() { "-".to_string() } else { p.purchase_option.clone() }),
+                    option_cell,
                 ]).style(row_style)
             }).collect();
 
@@ -1802,57 +2254,37 @@ impl PricingView {
                 Span::raw("Switch View  "),
                 Span::styled("[↓] ", Style::default().fg(Color::Yellow)),
                 Span::raw("Command  "),
-                Span::styled("[F1] ", Style::default().fg(Color::Magenta)),
-                Span::raw("Toggle Mode  "),
                 Span::styled("[F3] ", Style::default().fg(Color::Green)),
                 Span::raw("Refresh Metadata  "),
                 Span::styled("[Esc] ", Style::default().fg(Color::Red)),
                 Span::raw("Quit"),
             ]),
-            PricingSection::Command => match self.command_mode {
-                CommandMode::CommandBuilder => match self.builder_focus {
-                    BuilderFocus::Field => Line::from(vec![
-                        Span::styled("[↑↓] ", Style::default().fg(Color::Cyan)),
-                        Span::raw("Field / Header  "),
-                        Span::styled("[→] ", Style::default().fg(Color::Cyan)),
-                        Span::raw("Browse Suggestions  "),
-                        Span::styled("[Enter] ", Style::default().fg(Color::Green)),
-                        Span::raw("Submit  "),
-                        Span::styled("[⌫] ", Style::default().fg(Color::Yellow)),
-                        Span::raw("Remove  "),
-                        Span::styled("[F1] ", Style::default().fg(Color::Magenta)),
-                        Span::raw("Raw  "),
-                        Span::styled("[F2] ", Style::default().fg(Color::Yellow)),
-                        Span::raw("Reset  "),
-                        Span::styled("[F3] ", Style::default().fg(Color::Green)),
-                        Span::raw("Refresh  "),
-                        Span::styled("[←→] ", Style::default().fg(Color::Cyan)),
-                        Span::raw("Switch View (Header)"),
-                    ]),
-                    BuilderFocus::Suggestions => Line::from(vec![
-                        Span::styled("[↑↓] ", Style::default().fg(Color::Cyan)),
-                        Span::raw("Navigate  "),
-                        Span::styled("[Space] ", Style::default().fg(Color::Green)),
-                        Span::raw("Select  "),
-                        Span::styled("[←/Esc] ", Style::default().fg(Color::Yellow)),
-                        Span::raw("Back  "),
-                        Span::styled("[Enter] ", Style::default().fg(Color::Green)),
-                        Span::raw("Submit Query"),
-                    ]),
-                },
-                CommandMode::RawCommand => Line::from(vec![
-                    Span::styled("[↑↓] ", Style::default().fg(Color::Cyan)),
-                    Span::raw("Browse  "),
+            PricingSection::Command => match self.builder_focus {
+                BuilderFocus::Field => Line::from(vec![
+                    Span::styled("[←→] ", Style::default().fg(Color::Cyan)),
+                    Span::raw("Switch Field  "),
+                    Span::styled("[Tab] ", Style::default().fg(Color::Cyan)),
+                    Span::raw("Complete  "),
                     Span::styled("[Enter] ", Style::default().fg(Color::Green)),
-                    Span::raw("Select  "),
-                    Span::styled("[F1] ", Style::default().fg(Color::Magenta)),
-                    Span::raw("Builder  "),
+                    Span::raw("Submit  "),
+                    #[cfg(feature = "raw_command")]
+                    Span::styled("[F1] ", Style::default().fg(Color::Yellow)),
+                    #[cfg(feature = "raw_command")]
+                    Span::raw("Raw Mode  "),
                     Span::styled("[F2] ", Style::default().fg(Color::Yellow)),
-                    Span::raw("Reset All  "),
+                    Span::raw("Reset  "),
                     Span::styled("[F3] ", Style::default().fg(Color::Green)),
-                    Span::raw("Refresh  "),
-                    Span::styled("[Esc] ", Style::default().fg(Color::Red)),
-                    Span::raw("Quit"),
+                    Span::raw("Refresh Metadata"),
+                ]),
+                BuilderFocus::Suggestions => Line::from(vec![
+                    Span::styled("[↑↓←→] ", Style::default().fg(Color::Cyan)),
+                    Span::raw("Navigate  "),
+                    Span::styled("[Space] ", Style::default().fg(Color::Green)),
+                    Span::raw("Select  "),
+                    Span::styled("[↑] ", Style::default().fg(Color::Yellow)),
+                    Span::raw("Back to Input  "),
+                    Span::styled("[Enter] ", Style::default().fg(Color::Green)),
+                    Span::raw("Submit Query"),
                 ]),
             },
             PricingSection::Results => Line::from(vec![
@@ -1881,258 +2313,112 @@ impl PricingView {
     // ── Filtering ─────────────────────────────────────────────────────────────
 
     pub fn filter_items(&mut self) {
-        match self.command_mode {
-            CommandMode::RawCommand => {
-                if self.command_input.is_empty() {
-                    self.filtered_items = self.items.clone();
-                    self.selected = 0;
-                    return;
-                }
+        let r_tags: Vec<String> = self
+            .command_builder
+            .region_tags
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect();
+        let prod_tags: Vec<String> = self
+            .command_builder
+            .product_tags
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect();
+        let attr_tags: Vec<String> = self
+            .command_builder
+            .attribute_tags
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect();
+        let price_tags: Vec<String> = self
+            .command_builder
+            .price_tags
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect();
 
-                use fuzzy_matcher::skim::SkimMatcherV2;
-                use fuzzy_matcher::FuzzyMatcher;
+        if r_tags.is_empty()
+            && prod_tags.is_empty()
+            && attr_tags.is_empty()
+            && price_tags.is_empty()
+        {
+            self.filtered_items = self.items.clone();
+            self.selected = 0;
+            return;
+        }
 
-                let matcher = SkimMatcherV2::default();
-                let query = self.command_input.to_lowercase();
-                // Use shlex so quoted multi-word values become single tokens
-                let terms: Vec<String> = shlex::split(&query).unwrap_or_else(|| {
-                    query.split_whitespace().map(String::from).collect()
-                });
+        self.filtered_items = self
+            .items
+            .iter()
+            .filter(|item| {
+                // Region: OR across selected region tags
+                let region_ok = r_tags.is_empty()
+                    || r_tags.iter().any(|t| {
+                        item.region.to_lowercase().contains(t.as_str())
+                    });
+                // Product: OR across selected product tags
+                let product_ok = prod_tags.is_empty()
+                    || prod_tags.iter().any(|t| {
+                        item.product.to_lowercase().contains(t.as_str())
+                    });
+                // Attrs: ALL selected attr tags must be present (AND)
+                let attrs_ok = attr_tags.is_empty() || {
+                    let flat = item
+                        .attributes
+                        .iter()
+                        .map(|(k, v)| {
+                            format!(
+                                "{}={}",
+                                k.to_lowercase(),
+                                v.as_deref().unwrap_or("")
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    attr_tags
+                        .iter()
+                        .all(|t| flat.contains(t.as_str()))
+                };
 
-                let mut scored: Vec<(PricingDisplayItem, i64)> = self
-                    .items
-                    .iter()
-                    .filter_map(|item| {
-                        let searchable = format!(
-                            "{} {} {}",
-                            item.product,
-                            item.region,
-                            item.prices.iter().map(|p| p.price.as_str()).collect::<Vec<_>>().join(" ")
-                        )
-                        .to_lowercase();
-
-                        let all_match = terms
-                            .iter()
-                            .all(|t| matcher.fuzzy_match(&searchable, t).is_some());
-
-                        if all_match {
-                            let score =
-                                matcher.fuzzy_match(&searchable, &query).unwrap_or(0);
-                            Some((item.clone(), score))
+                // Price: local filtering by comparing with min_price (N/A treated as 0.0)
+                let price_ok = price_tags.is_empty() || {
+                    let mp_val = item.min_price.as_ref().map(|mp| {
+                        let s = mp.trim();
+                        if s.eq_ignore_ascii_case("na") || s.eq_ignore_ascii_case("n/a") || s == "-" {
+                            0.0f64
                         } else {
-                            None
+                            s.parse::<f64>().unwrap_or(0.0)
                         }
+                    }).unwrap_or(0.0);
+                    price_tags.iter().all(|pt| {
+                        if pt.starts_with(">=") {
+                            if let Ok(v) = pt[2..].parse::<f64>() { return mp_val >= v; }
+                        } else if pt.starts_with("<=") {
+                            if let Ok(v) = pt[2..].parse::<f64>() { return mp_val <= v; }
+                        } else if pt.starts_with('>') {
+                            if let Ok(v) = pt[1..].parse::<f64>() { return mp_val > v; }
+                        } else if pt.starts_with('<') {
+                            if let Ok(v) = pt[1..].parse::<f64>() { return mp_val < v; }
+                        }
+                        true
                     })
-                    .collect();
+                };
 
-                scored.sort_by(|a, b| b.1.cmp(&a.1));
-                self.filtered_items =
-                    scored.into_iter().map(|(item, _)| item).collect();
-                self.selected = 0;
-            }
+                region_ok && product_ok && attrs_ok && price_ok
+            })
+            .cloned()
+            .collect();
 
-            CommandMode::CommandBuilder => {
-                let r_tags: Vec<String> = self
-                    .command_builder
-                    .region_tags
-                    .iter()
-                    .map(|s| s.to_lowercase())
-                    .collect();
-                let prod_tags: Vec<String> = self
-                    .command_builder
-                    .product_tags
-                    .iter()
-                    .map(|s| s.to_lowercase())
-                    .collect();
-                let attr_tags: Vec<String> = self
-                    .command_builder
-                    .attribute_tags
-                    .iter()
-                    .map(|s| s.to_lowercase())
-                    .collect();
-                let price_tags: Vec<String> = self
-                    .command_builder
-                    .price_tags
-                    .iter()
-                    .map(|s| s.to_lowercase())
-                    .collect();
-
-                if r_tags.is_empty()
-                    && prod_tags.is_empty()
-                    && attr_tags.is_empty()
-                    && price_tags.is_empty()
-                {
-                    self.filtered_items = self.items.clone();
-                    self.selected = 0;
-                    return;
-                }
-
-                self.filtered_items = self
-                    .items
-                    .iter()
-                    .filter(|item| {
-                        // Region: OR across selected region tags
-                        let region_ok = r_tags.is_empty()
-                            || r_tags.iter().any(|t| {
-                                item.region.to_lowercase().contains(t.as_str())
-                            });
-                        // Product: OR across selected product tags
-                        let product_ok = prod_tags.is_empty()
-                            || prod_tags.iter().any(|t| {
-                                item.product.to_lowercase().contains(t.as_str())
-                            });
-                        // Attrs: ALL selected attr tags must be present (AND)
-                        let attrs_ok = attr_tags.is_empty() || {
-                            let flat = item
-                                .attributes
-                                .iter()
-                                .map(|(k, v)| {
-                                    format!(
-                                        "{}={}",
-                                        k.to_lowercase(),
-                                        v.as_deref().unwrap_or("")
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                                .join(" ");
-                            attr_tags
-                                .iter()
-                                .all(|t| flat.contains(t.as_str()))
-                        };
-
-                        // Price: local filtering by comparing with min_price
-                        let price_ok = price_tags.is_empty() || {
-                            item.min_price.as_ref().map(|mp| {
-                                price_tags.iter().all(|pt| {
-                                    if let Ok(mp_val) = mp.parse::<f64>() {
-                                        if pt.starts_with('>') {
-                                            if let Ok(v) = pt[1..].parse::<f64>() { return mp_val > v; }
-                                        } else if pt.starts_with('<') {
-                                            if let Ok(v) = pt[1..].parse::<f64>() { return mp_val < v; }
-                                        }
-                                    }
-                                    true
-                                })
-                            }).unwrap_or(true)
-                        };
-
-                        region_ok && product_ok && attrs_ok && price_ok
-                    })
-                    .cloned()
-                    .collect();
-
-                self.selected = 0;
-            }
-        }
+        self.selected = 0;
     }
 
-    fn toggle_mode(&mut self) {
-        match self.command_mode {
-            CommandMode::RawCommand => {
-                // Parse raw tokens → populate builder tags
-                let tokens: Vec<String> =
-                    shlex::split(&self.command_input).unwrap_or_default();
-                self.command_builder = CommandBuilderState::new();
 
-                let mut i = 0;
-                while i < tokens.len() {
-                    let lower = tokens[i].to_lowercase();
-                    if i + 1 < tokens.len() {
-                        let values: Vec<String> = tokens[i + 1]
-                            .split(',')
-                            .map(|v| v.trim().to_string())
-                            .filter(|v| !v.is_empty())
-                            .collect();
-                        match lower.as_str() {
-                            "product" => {
-                                for v in values {
-                                    if !self.command_builder.product_tags.contains(&v) {
-                                        self.command_builder.product_tags.push(v);
-                                    }
-                                }
-                                i += 2;
-                                continue;
-                            }
-                            "region" => {
-                                for v in values {
-                                    if !self.command_builder.region_tags.contains(&v) {
-                                        self.command_builder.region_tags.push(v);
-                                    }
-                                }
-                                i += 2;
-                                continue;
-                            }
-                            "attrs" => {
-                                for v in values {
-                                    if !self.command_builder.attribute_tags.contains(&v) {
-                                        self.command_builder.attribute_tags.push(v);
-                                    }
-                                }
-                                i += 2;
-                                continue;
-                            }
-                            "price" => {
-                                for v in values {
-                                    if !self.command_builder.price_tags.contains(&v) {
-                                        self.command_builder.price_tags.push(v);
-                                    }
-                                }
-                                i += 2;
-                                continue;
-                            }
-                            _ => {}
-                        }
-                    }
-                    i += 1;
-                }
-
-                self.command_mode = CommandMode::CommandBuilder;
-            }
-
-            CommandMode::CommandBuilder => {
-                // Serialise builder tags → raw command string
-                let mut parts: Vec<String> = Vec::new();
-                if !self.command_builder.product_tags.is_empty() {
-                    parts.push(format!(
-                        "product {}",
-                        self.command_builder.product_tags.join(",")
-                    ));
-                }
-                if !self.command_builder.region_tags.is_empty() {
-                    parts.push(format!(
-                        "region {}",
-                        self.command_builder.region_tags.join(",")
-                    ));
-                }
-                if !self.command_builder.attribute_tags.is_empty() {
-                    parts.push(format!(
-                        "attrs {}",
-                        self.command_builder.attribute_tags.join(",")
-                    ));
-                }
-                if !self.command_builder.price_tags.is_empty() {
-                    parts.push(format!(
-                        "price {}",
-                        self.command_builder.price_tags.join(",")
-                    ));
-                }
-                self.command_input = parts.join(" ");
-                self.command_mode = CommandMode::RawCommand;
-            }
-        }
-
-        self.builder_focus = BuilderFocus::Field;
-        self.suggestions_cache.clear();
-        self.suggestion_index = None;
-        self.update_suggestions();
-        // Skip filter_items() to preserve current results
-    }
 
     // ── Data loading ──────────────────────────────────────────────────────────
 
-    pub fn load_options(&mut self, client: &CloudCentClient) {
-        let config = client.get_config().cloned();
-        match crate::commands::pricing::load_metadata_async(config) {
+    pub fn load_options(&mut self) {
+        match crate::commands::pricing::load_metadata_async() {
             Ok(options) => {
                 self.options = Some(options);
                 self.update_suggestions();
@@ -2144,28 +2430,6 @@ impl PricingView {
         }
     }
 
-
-    #[allow(dead_code)]
-    pub async fn load_data(&mut self, client: &CloudCentClient) {
-        self.loading = true;
-        self.error_message = None;
-
-        match client
-            .fetch_pricing_multi(&[], &[], std::collections::HashMap::new(), &[])
-            .await
-        {
-            Ok(response) => {
-                self.items = Self::convert_response(response);
-                self.filtered_items = self.items.clone();
-                self.loading = false;
-                self.h_scroll_offset = 0;
-            }
-            Err(e) => {
-                self.error_message = Some(e.to_string());
-                self.loading = false;
-            }
-        }
-    }
 
     fn stringify_json(v: &Option<serde_json::Value>) -> Option<String> {
         let s = match v {
@@ -2182,7 +2446,7 @@ impl PricingView {
             .data
             .into_iter()
             .map(|item| {
-                let prices: Vec<PriceInfo> = item.prices.iter().map(|p| {
+                let mut prices: Vec<PriceInfo> = item.prices.iter().map(|p| {
                     let display_price = if let Some(rates) = &p.rates {
                         if let Some(first_rate) = rates.first() {
                             Self::stringify_json(&first_rate.price).unwrap_or_else(|| "N/A".to_string())
@@ -2210,9 +2474,22 @@ impl PricingView {
                         upfront_fee: Self::stringify_json(&p.upfront_fee).unwrap_or_default(),
                         purchase_option: p.purchase_option.clone().unwrap_or_default(),
                         year: Self::stringify_json(&p.year).unwrap_or_default(),
+                        interruption_max_pct: Self::stringify_json(&p.interruption_max_pct),
                         rates: rate_infos,
                     }
                 }).collect();
+
+                // Fill empty units from the OnDemand model's unit
+                let ondemand_unit = prices.iter()
+                    .find(|p| p.pricing_model.eq_ignore_ascii_case("ondemand") && !p.unit.is_empty())
+                    .map(|p| p.unit.clone());
+                if let Some(ref fallback) = ondemand_unit {
+                    for p in &mut prices {
+                        if p.unit.is_empty() {
+                            p.unit = fallback.clone();
+                        }
+                    }
+                }
 
                 PricingDisplayItem {
                     product: if item.provider.is_empty() {

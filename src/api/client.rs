@@ -25,11 +25,6 @@ impl CloudCentClient {
         self.config.as_ref()
     }
 
-    #[allow(dead_code)]
-    pub fn set_config(&mut self, config: Config) {
-        self.config = Some(config);
-    }
-
     pub fn load_config(&mut self) -> Result<Option<Config>> {
         let config = crate::config::load_config()?;
         self.config = config.clone();
@@ -118,42 +113,6 @@ impl CloudCentClient {
         Ok(pricing)
     }
 
-    #[allow(dead_code)]
-    async fn post_text(&self, endpoint: &str, extra_headers: &[(&str, &str)]) -> Result<String> {
-        let url = format!("{}{}", API_BASE_URL, endpoint);
-
-        let mut request = self.client
-            .post(&url)
-            .header("Content-Type", "application/json");
-
-        for (key, value) in extra_headers {
-            request = request.header(*key, *value);
-        }
-
-        let response = request
-            .send()
-            .await
-            .context("Failed to connect to CloudCent API")?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            anyhow::bail!("API request failed with status {}: {}", status, error_text);
-        }
-        let text = response
-            .text()
-            .await
-            .context("Failed to parse API response")?
-            .trim()
-            .to_string();
-
-        if text.is_empty() {
-            anyhow::bail!("Received empty response from server");
-        }
-
-        Ok(text)
-    }
-
-
     pub async fn get(&self, endpoint: &str) -> Result<reqwest::Response> {
         let config = self
             .config
@@ -177,7 +136,8 @@ impl CloudCentClient {
         Ok(response)
     }
 
-    /// Get metadata including all providers, regions, products, and attributes
+    /// Fetch and decompress metadata in-memory (alternative to download_metadata_gz).
+    #[allow(dead_code)]
     pub async fn get_metadata(&self) -> Result<MetadataResponse> {
         let response = self.get("/pricing/metadata").await?;
         

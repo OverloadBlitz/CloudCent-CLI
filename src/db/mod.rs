@@ -6,20 +6,21 @@ use std::path::PathBuf;
 use crate::api::{PricingApiResponse, MetadataResponse};
 
 const CACHE_TTL_DAYS: i64 = 3;
+#[allow(dead_code)]
 const METADATA_CACHE_TTL_HOURS: i64 = 24;
 
-#[allow(dead_code)]
 pub struct Database {
     conn: Connection,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct QueryHistory {
     pub id: i64,
+    #[allow(dead_code)]
     pub providers: String,
     pub regions: String,
-    pub categories: String, // reserved for future use
+    #[allow(dead_code)]
+    pub categories: String,
     pub product_families: String,
     pub attributes: String,
     pub prices: String,
@@ -28,7 +29,6 @@ pub struct QueryHistory {
     pub created_at: DateTime<Utc>,
 }
 
-#[allow(dead_code)]
 impl Database {
     pub fn new() -> Result<Self> {
         let db_path = Self::get_db_path()?;
@@ -179,11 +179,13 @@ impl Database {
         Ok(history)
     }
     
+    #[allow(dead_code)]
     pub fn delete_history(&self, id: i64) -> Result<()> {
         self.conn.execute("DELETE FROM query_history WHERE id = ?1", [id])?;
         Ok(())
     }
-    
+
+    #[allow(dead_code)]
     pub fn clear_history(&self) -> Result<()> {
         self.conn.execute("DELETE FROM query_history", [])?;
         Ok(())
@@ -230,6 +232,7 @@ impl Database {
         Ok(())
     }
     
+    #[allow(dead_code)]
     pub fn cleanup_expired_cache(&self) -> Result<usize> {
         let cutoff = (Utc::now() - Duration::days(CACHE_TTL_DAYS)).to_rfc3339();
         let deleted = self.conn.execute(
@@ -256,6 +259,7 @@ impl Database {
         Ok((count as usize, size as usize))
     }
     
+    #[allow(dead_code)]
     pub fn clear_cache(&self) -> Result<usize> {
         let deleted = self.conn.execute("DELETE FROM pricing_cache", [])?;
         Ok(deleted)
@@ -290,7 +294,8 @@ impl Database {
     }
     
     // === Metadata Cache Methods ===
-    
+
+    #[allow(dead_code)]
     pub fn get_metadata_cache(&self) -> Result<Option<MetadataResponse>> {
         let cutoff = (Utc::now() - Duration::hours(METADATA_CACHE_TTL_HOURS)).to_rfc3339();
         
@@ -311,6 +316,7 @@ impl Database {
         Ok(None)
     }
     
+    #[allow(dead_code)]
     pub fn set_metadata_cache(&self, metadata: &MetadataResponse) -> Result<()> {
         let json = serde_json::to_string(metadata)?;
         let now = Utc::now().to_rfc3339();
@@ -324,6 +330,7 @@ impl Database {
         Ok(())
     }
     
+    #[allow(dead_code)]
     pub fn clear_metadata_cache(&self) -> Result<()> {
         self.conn.execute("DELETE FROM metadata_cache WHERE id = 1", [])?;
         Ok(())
@@ -331,6 +338,7 @@ impl Database {
 
     // === Estimate Persistence Methods ===
 
+    #[allow(dead_code)]
     pub fn save_estimate(&self, name: &str, estimate_json: &str) -> Result<i64> {
         let now = Utc::now().to_rfc3339();
         // Upsert by name
@@ -342,6 +350,7 @@ impl Database {
         Ok(self.conn.last_insert_rowid())
     }
 
+    #[allow(dead_code)]
     pub fn load_estimates(&self) -> Result<Vec<(i64, String, String)>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, estimate_json FROM estimates ORDER BY updated_at DESC"
@@ -354,6 +363,7 @@ impl Database {
         Ok(results)
     }
 
+    #[allow(dead_code)]
     pub fn delete_estimate(&self, id: i64) -> Result<()> {
         self.conn.execute("DELETE FROM estimates WHERE id = ?1", [id])?;
         Ok(())

@@ -33,8 +33,7 @@ pub struct Config {
     pub api_key: Option<String>,
 }
 
-/// Rate within a price
-#[allow(dead_code)]
+/// A single tier within a price model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PriceRate {
     #[serde(default)]
@@ -45,7 +44,6 @@ pub struct PriceRate {
     pub end_range: Option<serde_json::Value>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Price {
     #[serde(default)]
@@ -58,13 +56,12 @@ pub struct Price {
     pub year: Option<serde_json::Value>,
     #[serde(default)]
     pub unit: Option<String>,
-    #[serde(rename = "currencyCode", default)]
-    pub currency_code: Option<String>,
     #[serde(rename = "purchaseOption", default)]
     pub purchase_option: Option<String>,
+    #[serde(rename = "interruptionMaxPct", default)]
+    pub interruption_max_pct: Option<serde_json::Value>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PricingItem {
     pub product: String,
@@ -93,8 +90,7 @@ pub struct PricingRequest {
     pub prices: Vec<String>,
 }
 
-/// Metadata API response structure
-#[allow(dead_code)]
+/// Metadata response from the pricing API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetadataResponse {
     pub product_regions: HashMap<String, Vec<String>>,
@@ -106,7 +102,7 @@ pub struct MetadataResponse {
     pub product_groups: HashMap<String, u64>,
 }
 
-/// Generate token API response
+/// Response from the generate-token endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerateTokenResponse {
     #[serde(alias = "token")]
@@ -115,7 +111,7 @@ pub struct GenerateTokenResponse {
     pub exchange_code: String,
 }
 
-/// Exchange API response
+/// Response from the token-exchange endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExchangeResponse {
     #[serde(default)]

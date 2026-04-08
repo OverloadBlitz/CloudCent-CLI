@@ -4,15 +4,14 @@ use std::time::Duration;
 
 use crate::api::{CloudCentClient, Config};
 
-/// Callback data for new auth flow
 #[derive(Debug, Clone)]
 pub enum CallbackData {
     Pending,
-    Received { cli_id: String, api_key: String },
+    AuthReceived { cli_id: String, api_key: String },
+    MetadataDownloaded,
     Failed(String),
 }
 
-/// User initialization result
 #[allow(dead_code)]
 pub struct InitResult {
     pub cli_id: String,
@@ -31,6 +30,10 @@ impl UserCommand {
         Self { client }
     }
 
+    pub fn from_client(client: CloudCentClient) -> Self {
+        Self { client }
+    }
+
     pub fn client(&self) -> &CloudCentClient {
         &self.client
     }
@@ -43,83 +46,79 @@ impl UserCommand {
         self.client.get_config().is_some()
     }
 
-    /// Start browser auth flow for TUI - returns exchange_code and callback data
-    pub async fn start_browser_auth_for_tui(&self) -> Result<(String, Arc<Mutex<CallbackData>>), String> {
-        // 1. 调用 /api/auth/generate-token 获取 access_token 和 exchange_code
-        let token_response = self.client
+    /// Generate a one-time token and open the browser auth URL.
+    /// Returns the exchange_code to use for polling.
+    pub async fn start_browser_auth(&self) -> Result<String, String> {
+        let token_response = self
+            .client
             .generate_token()
             .await
             .map_err(|e| format!("Failed to generate token: {}", e))?;
-        
-        let callback_data = Arc::new(Mutex::new(CallbackData::Pending));
-        
-        // 2. 打开浏览器，传递 token 和 exchange
+
         let auth_url = format!(
             "{}?token={}&exchange={}",
             crate::api::client::CLI_BASE_URL,
             token_response.access_token,
             token_response.exchange_code
         );
-        
-        open::that(&auth_url)
-            .map_err(|e| format!("Failed to open browser: {}", e))?;
-        
-        Ok((token_response.exchange_code, callback_data))
+
+        open::that(&auth_url).map_err(|e| format!("Failed to open browser: {}", e))?;
+
+        Ok(token_response.exchange_code)
     }
-    
-    /// Poll for credentials using exchange_code
-    pub async fn poll_for_credentials(&self, exchange_code: &str, callback_data: Arc<Mutex<CallbackData>>) -> Result<(), String> {
-        // 轮询 /api/auth/exchange 获取凭证（每2秒一次）
-        let max_attempts = 150; // 5 分钟超时
-        
+
+    /// Poll the exchange endpoint until credentials arrive or a 5-minute timeout.
+    /// Writes the final outcome into `callback_data`.
+    pub async fn poll_for_credentials(
+        &self,
+        exchange_code: &str,
+        callback_data: Arc<Mutex<CallbackData>>,
+    ) -> Result<(), String> {
+        let max_attempts = 150; // 5-minute timeout at 2-second intervals
+
         for _attempt in 0..max_attempts {
             tokio::time::sleep(Duration::from_secs(2)).await;
-            
+
             match self.client.exchange_token(exchange_code).await {
                 Ok(response) => {
-                    // 如果有 cli_id 和 api_key，说明认证完成
-                    if let (Some(cli_id), Some(api_key)) = (response.cli_id.clone(), response.api_key.clone()) {
-                        *callback_data.lock().unwrap() = CallbackData::Received {
-                            cli_id,
-                            api_key,
-                        };
+                    if let (Some(cli_id), Some(api_key)) =
+                        (response.cli_id.clone(), response.api_key.clone())
+                    {
+                        *callback_data.lock().unwrap() =
+                            CallbackData::AuthReceived { cli_id, api_key };
                         return Ok(());
                     }
-                    
-                    // 检查 status 字段
+
                     if let Some(status) = &response.status {
                         match status.as_str() {
                             "expired" => {
                                 *callback_data.lock().unwrap() = CallbackData::Failed(
-                                    "Authentication token expired".to_string()
+                                    "Authentication token expired".to_string(),
                                 );
                                 return Err("Authentication token expired".to_string());
                             }
-                            "pending" => {
-                                continue;
-                            }
+                            "pending" => continue,
                             _ => {}
                         }
                     }
-                    
-                    // 如果没有凭证也没有明确的状态，继续轮询
+
                     continue;
                 }
-                Err(_e) => {
-                    // 网络错误，继续重试
-                    continue;
-                }
+                Err(_) => continue, // network error, retry
             }
         }
-        
-        *callback_data.lock().unwrap() = CallbackData::Failed(
-            "Authentication timeout".to_string()
-        );
+
+        *callback_data.lock().unwrap() =
+            CallbackData::Failed("Authentication timeout".to_string());
         Err("Authentication timeout".to_string())
     }
-    
-    /// Complete auth with token for TUI
-    pub async fn complete_auth_for_tui(&mut self, cli_id: &str, api_key: &str) -> Result<InitResult, String> {
+
+    /// Persist the received credentials to the config file.
+    pub async fn complete_auth_for_tui(
+        &mut self,
+        cli_id: &str,
+        api_key: &str,
+    ) -> Result<InitResult, String> {
         let config = Config {
             cli_id: cli_id.to_string(),
             api_key: Some(api_key.to_string()),

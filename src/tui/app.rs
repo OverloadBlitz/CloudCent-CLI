@@ -22,6 +22,7 @@ pub enum ViewMode {
 
 /// Auth states for InitAuth view
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum AuthState {
     Prompt,      // Show the initial prompt
     Waiting,     // Waiting for browser auth
@@ -49,7 +50,6 @@ pub struct App {
     pub user_command: UserCommand,
     pub error_message: Option<String>,
     pub callback_data: Option<std::sync::Arc<std::sync::Mutex<CallbackData>>>,
-    pub exchange_code: String,
     pub loading_frame: usize,
     /// Metadata refresh status message: (message, is_success)
     pub metadata_refresh_msg: Option<(String, bool)>,
@@ -86,7 +86,6 @@ impl App {
             user_command,
             error_message: None,
             callback_data: None,
-            exchange_code: String::new(),
             loading_frame: 0,
             metadata_refresh_msg: None,
             refresh_msg_frames: 0,
@@ -102,7 +101,7 @@ impl App {
         };
 
         if app.view_mode == ViewMode::Pricing {
-            app.pricing_view.load_options(app.user_command.client());
+            app.pricing_view.load_options();
         }
 
         Ok(app)
@@ -167,7 +166,7 @@ impl App {
             AuthState::Prompt => {
                 match key.code {
                     KeyCode::Enter => {
-                        self.start_auth_flow()?;
+                        self.start_auth_flow();
                     }
                     KeyCode::Esc => {
                         self.should_quit = true;
@@ -178,11 +177,10 @@ impl App {
             AuthState::Waiting => {
                 match key.code {
                     KeyCode::Char('r') | KeyCode::Char('R') => {
-                        // Cancel current poll and restart auth flow
+                        // Discard the current poll (its callback_data Arc is dropped) and retry
                         self.callback_data = None;
-                        self.exchange_code = String::new();
                         self.auth_state = AuthState::Prompt;
-                        self.start_auth_flow()?;
+                        self.start_auth_flow();
                     }
                     KeyCode::Esc => {
                         self.should_quit = true;
@@ -193,39 +191,10 @@ impl App {
             AuthState::Success => {
                 match key.code {
                     KeyCode::Enter => {
-                        // Set loading state
                         self.auth_state = AuthState::Loading;
                         self.loading_frame = 0;
-                        
-                        // Reload config to ensure we have the credentials
                         let _ = self.user_command.client_mut().load_config();
-                        
-                        // Spawn async task to download metadata
-                        let user_command = self.user_command.client().clone();
-                        let callback_data = Arc::new(Mutex::new(CallbackData::Pending));
-                        let callback_data_clone = callback_data.clone();
-                        self.callback_data = Some(callback_data);
-                        
-                        std::thread::spawn(move || {
-                            let rt = tokio::runtime::Runtime::new().unwrap();
-                            let result = rt.block_on(async {
-                                user_command.download_metadata_gz().await
-                            });
-                            
-                            match result {
-                                Ok(_) => {
-                                    *callback_data_clone.lock().unwrap() = CallbackData::Received {
-                                        cli_id: String::new(),
-                                        api_key: String::new(),
-                                    };
-                                }
-                                Err(e) => {
-                                    *callback_data_clone.lock().unwrap() = CallbackData::Failed(
-                                        e.to_string()
-                                    );
-                                }
-                            }
-                        });
+                        self.spawn_metadata_download();
                     }
                     KeyCode::Esc => {
                         self.should_quit = true;
@@ -296,11 +265,7 @@ impl App {
             return;
         }
 
-        use crate::tui::views::pricing::CommandMode;
-        if self.pricing_view.command_mode == CommandMode::RawCommand {
-            let input = self.pricing_view.command_input.clone();
-            self.pricing_view.sync_builder_from_raw(&input);
-        }
+
 
         let builder = &self.pricing_view.command_builder;
         let products = builder.product_tags.clone();
@@ -465,7 +430,6 @@ impl App {
             if let Some(product) = res.products.get(pi) {
                 // Populate PricingView's builder with tags from estimate product
                 self.pricing_view.command_builder = product.builder.clone();
-                self.pricing_view.command_mode = crate::tui::views::pricing::CommandMode::CommandBuilder;
                 self.view_mode = ViewMode::Pricing;
                 self.pricing_view.active_section = crate::tui::views::pricing::PricingSection::Command;
                 self.pricing_view.builder_focus = crate::tui::views::pricing::BuilderFocus::Field;
@@ -522,7 +486,6 @@ impl App {
                     
                     self.view_mode = crate::tui::app::ViewMode::Pricing;
                     self.pricing_view.active_section = crate::tui::views::pricing::PricingSection::Command;
-                    self.pricing_view.command_mode = crate::tui::views::pricing::CommandMode::CommandBuilder;
                     
                     // Trigger query if cache missing, otherwise load from cache
                     if let Some(ref db) = self.db {
@@ -626,138 +589,104 @@ impl App {
     
     fn start_metadata_refresh(&mut self) {
         if self.auth_state == AuthState::Loading {
-            return; // already loading
+            return;
         }
         self.auth_state = AuthState::Loading;
         self.loading_frame = 0;
-        self.refresh_msg_frames = 60; // Show for 60 iterations (~6s at 100ms poll)
+        self.refresh_msg_frames = 60; // ~6 s at 100 ms poll
         self.metadata_refresh_msg = Some(("Refreshing metadata...".to_string(), true));
+        self.spawn_metadata_download();
+    }
 
-        let user_command = self.user_command.client().clone();
+    /// Kick off the browser auth flow without blocking the UI event loop.
+    /// Spawns a single background thread that generates a token, opens the
+    /// browser, and polls until credentials arrive — all in one shot.
+    fn start_auth_flow(&mut self) {
+        self.auth_state = AuthState::Waiting;
+        let client = self.user_command.client().clone();
         let callback_data = Arc::new(Mutex::new(CallbackData::Pending));
-        let callback_data_clone = callback_data.clone();
-        self.callback_data = Some(callback_data);
+        self.callback_data = Some(callback_data.clone());
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
-            let result = rt.block_on(async { user_command.download_metadata_gz().await });
-            match result {
-                Ok(_) => {
-                    *callback_data_clone.lock().unwrap() = CallbackData::Received {
-                        cli_id: String::new(),
-                        api_key: String::new(),
-                    };
-                }
-                Err(e) => {
-                    *callback_data_clone.lock().unwrap() = CallbackData::Failed(e.to_string());
-                }
-            }
+            rt.block_on(async {
+                let cmd = UserCommand::from_client(client);
+                let exchange_code = match cmd.start_browser_auth().await {
+                    Ok(code) => code,
+                    Err(e) => {
+                        *callback_data.lock().unwrap() = CallbackData::Failed(e);
+                        return;
+                    }
+                };
+                let _ = cmd.poll_for_credentials(&exchange_code, callback_data).await;
+            });
         });
     }
 
-    fn start_auth_flow(&mut self) -> Result<()> {
-        let rt = tokio::runtime::Runtime::new()?;
-        
-        match rt.block_on(async { self.user_command.start_browser_auth_for_tui().await }) {
-            Ok((exchange_code, callback_data)) => {
-                self.exchange_code = exchange_code.clone();
-                self.callback_data = Some(callback_data.clone());
-                self.auth_state = AuthState::Waiting;
-                
-                // 启动轮询任务
-                let user_command = UserCommand::new();
-                let exchange_code_clone = exchange_code.clone();
-                let callback_data_clone = callback_data.clone();
-                
-                std::thread::spawn(move || {
-                    let rt = tokio::runtime::Runtime::new().unwrap();
-                    let _ = rt.block_on(async {
-                        user_command.poll_for_credentials(&exchange_code_clone, callback_data_clone).await
-                    });
-                });
-                
-                Ok(())
+    /// Spawn a background thread to download metadata.json.gz and signal
+    /// completion (or failure) via `self.callback_data`.
+    fn spawn_metadata_download(&mut self) {
+        let client = self.user_command.client().clone();
+        let callback_data = Arc::new(Mutex::new(CallbackData::Pending));
+        self.callback_data = Some(callback_data.clone());
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let result = rt.block_on(async { client.download_metadata_gz().await });
+            match result {
+                Ok(_) => *callback_data.lock().unwrap() = CallbackData::MetadataDownloaded,
+                Err(e) => *callback_data.lock().unwrap() = CallbackData::Failed(e.to_string()),
             }
-            Err(e) => {
-                self.error_message = Some(e);
-                self.auth_state = AuthState::Error;
-                Ok(())
-            }
-        }
+        });
     }
     
     fn check_callback_data(&mut self) -> Result<()> {
         if let Some(callback_data) = &self.callback_data {
             let data = callback_data.lock().unwrap().clone();
-            
+
             match data {
-                CallbackData::Received { cli_id, api_key } => {
-                    if !cli_id.is_empty() && !api_key.is_empty() {
-                        // Auth credentials just received — save config, then auto-trigger metadata download
-                        let rt = tokio::runtime::Runtime::new()?;
-                        let result = rt.block_on(async {
-                            self.user_command.complete_auth_for_tui(&cli_id, &api_key).await
-                        });
-                        match result {
-                            Ok(_) => {
-                                // Reload config so the client has the new API key
-                                let _ = self.user_command.client_mut().load_config();
-                                // Automatically start metadata download without requiring user to press Enter
-                                self.auth_state = AuthState::Loading;
-                                self.loading_frame = 0;
-                                self.callback_data = None;
-
-                                let user_command = self.user_command.client().clone();
-                                let cb = Arc::new(Mutex::new(CallbackData::Pending));
-                                let cb_clone = cb.clone();
-                                self.callback_data = Some(cb);
-
-                                std::thread::spawn(move || {
-                                    let rt = tokio::runtime::Runtime::new().unwrap();
-                                    let result = rt.block_on(async {
-                                        user_command.download_metadata_gz().await
-                                    });
-                                    match result {
-                                        Ok(_) => {
-                                            *cb_clone.lock().unwrap() = CallbackData::Received {
-                                                cli_id: String::new(),
-                                                api_key: String::new(),
-                                            };
-                                        }
-                                        Err(e) => {
-                                            *cb_clone.lock().unwrap() = CallbackData::Failed(e.to_string());
-                                        }
-                                    }
-                                });
-                            }
-                            Err(e) => {
-                                self.error_message = Some(e);
-                                self.auth_state = AuthState::Error;
-                                self.callback_data = None;
-                            }
+                CallbackData::AuthReceived { cli_id, api_key } => {
+                    // Persist credentials, then immediately start metadata download
+                    let rt = tokio::runtime::Runtime::new()?;
+                    let result = rt.block_on(async {
+                        self.user_command.complete_auth_for_tui(&cli_id, &api_key).await
+                    });
+                    match result {
+                        Ok(_) => {
+                            let _ = self.user_command.client_mut().load_config();
+                            self.auth_state = AuthState::Loading;
+                            self.loading_frame = 0;
+                            self.callback_data = None;
+                            self.spawn_metadata_download();
                         }
+                        Err(e) => {
+                            self.error_message = Some(e);
+                            self.auth_state = AuthState::Error;
+                            self.callback_data = None;
+                        }
+                    }
+                }
+                CallbackData::MetadataDownloaded => {
+                    self.pricing_view.load_options();
+                    #[cfg(feature = "estimate")]
+                    {
+                        self.estimate_view.options = self.pricing_view.options.clone();
+                    }
+                    self.callback_data = None;
+
+                    if self.view_mode == ViewMode::InitAuth {
+                        self.view_mode = ViewMode::Pricing;
+                        self.auth_state = AuthState::Prompt;
                     } else {
-                        // Metadata download completed (cli_id/api_key are empty sentinels)
-                        self.pricing_view.load_options(self.user_command.client());
-                        #[cfg(feature = "estimate")]
-                        { self.estimate_view.options = self.pricing_view.options.clone(); }
-                        self.callback_data = None;
-
-                        if self.view_mode == ViewMode::InitAuth {
-                            // Initial auth flow: transition to Pricing
-                            self.view_mode = ViewMode::Pricing;
-                            self.auth_state = AuthState::Prompt;
-                        } else {
-                            // On-demand refresh via F3
-                            self.metadata_refresh_msg = Some(("Refresh Succeed".to_string(), true));
-                            self.refresh_msg_frames = 40;
-                            self.auth_state = AuthState::Prompt;
-                        }
+                        // On-demand refresh via F3
+                        self.metadata_refresh_msg = Some(("Refresh Succeed".to_string(), true));
+                        self.refresh_msg_frames = 40;
+                        self.auth_state = AuthState::Prompt;
                     }
                 }
                 CallbackData::Failed(msg) => {
                     self.metadata_refresh_msg = Some((format!("Refresh Error: {}", msg), false));
-                    self.refresh_msg_frames = 120; // error shows longer
+                    self.refresh_msg_frames = 120;
                     if self.view_mode == ViewMode::InitAuth {
                         self.error_message = Some(msg);
                         self.auth_state = AuthState::Error;
@@ -766,12 +695,10 @@ impl App {
                     }
                     self.callback_data = None;
                 }
-                CallbackData::Pending => {
-                    // Still waiting
-                }
+                CallbackData::Pending => {}
             }
         }
-        
+
         Ok(())
     }
 }

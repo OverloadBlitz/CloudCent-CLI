@@ -999,7 +999,7 @@ impl EstimateView {
         let suggestion_area = main_horiz[1];
 
         // Builder fields
-        let field_names = ["Product", "Region", "Attrs", "Price"];
+        let field_names = ["Product", "Region", "Specs", "Price"];
         let mut field_lines: Vec<Line> = Vec::new();
         field_lines.push(Line::from(vec![
             Span::styled(format!(" {} > {} ", resource.name, product.label), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
