@@ -7,7 +7,7 @@
 A terminal UI for querying and comparing cloud pricing across providers, built with Rust and [Ratatui](https://ratatui.rs).
 
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
-![Version](https://img.shields.io/badge/version-0.0.1--beta-orange)
+![Version](https://img.shields.io/badge/version-0.0.2--beta-orange)
 
 ## Installation
 
@@ -56,12 +56,13 @@ On first launch you'll be prompted to authenticate via browser. This sets up a f
 
 ## Supported Providers & Pricing Models
 
-| Provider | Services | Pricing Model                                                    |
-|----------|----------|------------------------------------------------------------------|
-| AWS | EC2, ECS, EKS, S3, RDS, ElastiCache, EMR, SageMaker, Bedrock, Direct Connect, Data Transfer, Backup | OnDemand, Reserved, SavingPlan, Spot                             |
-| Azure | Virtual Machines, AKS, Container, Storage, SQL Database, Redis, Backup, Machine Learning, OpenAI, ExpressRoute, Bandwidth, Big Data | OnDemand, Reserved, SavingPlan (with/without Azure Hybrid Benefit) |
-| GCP | Compute Engine, Cloud Storage, Cloud SQL, GKE, Memorystore, Vertex AI, Big Data, Data Transfer | OnDemand, CommitedUseDiscount, Preemptible               |
-| OCI | Compute, Object Storage, Database Instance, Cache, Backup, FastConnect, Data Transfer, Generative AI | OnDemand (PAYG)                                                  |
+| Provider                                     | Services                                                                                                                            | Pricing Model                                                      |
+|----------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------|
+| AWS                                          | EC2, ECS, EKS, S3, RDS, ElastiCache, EMR, SageMaker, Bedrock, Direct Connect, Data Transfer, Backup                                 | OnDemand, Reserved, SavingPlan, Spot                               |
+| Azure                                        | Virtual Machines, AKS, Container, Storage, SQL Database, Redis, Backup, Machine Learning, OpenAI, ExpressRoute, Bandwidth, Big Data | OnDemand, Reserved, SavingPlan (with/without Azure Hybrid Benefit) |
+| GCP                                          | Compute Engine, Cloud Storage, Cloud SQL, GKE, Memorystore, Vertex AI, Big Data, Data Transfer                                      | OnDemand, CommitedUseDiscount, Preemptible                         |
+| OCI                                          | Compute, Object Storage, Database Instance, Cache, Backup, FastConnect, Data Transfer, Generative AI                                | OnDemand (PAYG)                                                    |
+| OpenAI, Anthropic, Deepseek, Z.ai, Minimax, Openrouter | LLM API                                                                                                                             | OnDemand                                                           |
 
 > ⚠️ Beta limitation:
 > * **Result Limit**: Queries return a maximum of 150 results, sorted by minimum price (ascending)
