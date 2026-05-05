@@ -1,0 +1,69 @@
+package resources
+
+import (
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
+)
+
+type ResourceRecord struct {
+	Type             string
+	Name             string
+	ID               string
+	Inputs           resource.PropertyMap
+	MockedProperties map[string]string
+}
+
+type DecodedResource struct {
+	Provider       string
+	Region         string
+	Service        string
+	Name           string
+	SubLabel       string            // non-empty when one resource produces multiple pricing queries (e.g. "Requests", "Duration")
+	RawType        string            // original Pulumi resource type, e.g. "aws:ec2/securityGroup:SecurityGroup"
+	Attrs          map[string]string // pricing attributes
+	Props          map[string]string // display properties (instance type, region, etc.)
+	InputsJSON     string            // formatted Pulumi input properties for debugging/inspection
+	PriceFilter    string
+	NoPricing      bool // true for resources that don't have pricing (e.g. security groups)
+	IsFreeType     bool // true when the resource type is in the metadata free_types list
+	RegionFallback bool // true when region was not detected and us-east-1 was used as default
+}
+
+// PriceEntry is one pricing option for a resource.
+type PriceEntry struct {
+	Model          string     // OnDemand, Reserved, spot, ComputeSavingsPlans, EC2InstanceSavingsPlans
+	PurchaseOption string     // standard, convertible, All Upfront, Partial Upfront, No Upfront
+	Term           string     // 1yr, 3yr, or empty for on-demand/spot
+	UpfrontFee     string     // dollar amount or empty
+	RatePerHr      float64    // hourly rate (first tier for tiered pricing)
+	Unit           string     // Hrs, Requests, etc.
+	IsCurrent      bool       // true for the OnDemand price (what you pay right now)
+	IsUsageBased   bool       // true when unit is not time-based (e.g. Requests, Messages, GB)
+	Tiers          []RateTier // non-nil when pricing is volume-tiered
+}
+
+// RateTier is a single tier within volume-based pricing.
+type RateTier struct {
+	Price      string // e.g. "0.0000035000"
+	StartRange string // e.g. "0"
+	EndRange   string // e.g. "333000000", "Inf"
+}
+
+type EstimateResult struct {
+	ResourceName string
+	SubLabel     string // non-empty when grouped under a parent resource (e.g. "Requests", "Duration")
+	RawType      string
+	Product      string
+	Props        map[string]string
+	InputsJSON   string       // formatted Pulumi input properties, empty for non-Pulumi estimates
+	Prices       []PriceEntry // structured pricing options; nil if no pricing
+	OnDemandRate float64      // convenience: the OnDemand hourly rate (0 if unknown)
+	StatusMsg    string       // non-empty when pricing lookup failed
+	// Usage-based fields
+	IsUsageBased bool    // true when pricing is per-request/message/GB rather than per-hour
+	UsageUnit    string  // e.g. "Requests", "Messages", "GB"
+	UsageQty     float64 // monthly quantity used for estimation (user-supplied or default)
+	UsageDefault bool    // true when UsageQty came from the built-in default
+	UsageMonthly float64 // estimated monthly cost = f(tiers, UsageQty)
+	// Region metadata
+	RegionFallback bool // true when region was not detected and us-east-1 was used
+}

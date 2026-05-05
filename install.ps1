@@ -7,17 +7,16 @@ $Binary = "cloudcent"
 $InstallDir = "$env:USERPROFILE\.cloudcent\bin"
 
 function Detect-Arch {
-    # Try .NET Core API first (PowerShell 7+), fall back to environment variable
     try {
         $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
     } catch {
         $arch = $env:PROCESSOR_ARCHITECTURE
     }
     switch ($arch) {
-        "X64"    { return "x86_64" }
-        "AMD64"  { return "x86_64" }
-        "Arm64"  { return "aarch64" }
-        "ARM64"  { return "aarch64" }
+        "X64"   { return "amd64" }
+        "AMD64" { return "amd64" }
+        "Arm64" { return "arm64" }
+        "ARM64" { return "arm64" }
         default {
             Write-Error "Unsupported architecture: $arch"
             exit 1
@@ -42,8 +41,7 @@ function Add-ToPath($dir) {
 
 function Main {
     $arch = Detect-Arch
-    $platform = "windows-$arch"
-    Write-Host "Detected platform: $platform"
+    Write-Host "Detected architecture: $arch"
 
     Write-Host "Fetching latest release..."
     $version = Get-LatestVersion
@@ -53,7 +51,9 @@ function Main {
     }
     Write-Host "Latest version: $version"
 
-    $archiveName = "$Binary-$platform.zip"
+    # goreleaser archive format: cloudcent_<version>_windows_<arch>.zip
+    $ver = $version.TrimStart('v')
+    $archiveName = "${Binary}_${ver}_windows_${arch}.zip"
     $url = "https://github.com/$Repo/releases/download/$version/$archiveName"
 
     $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString())

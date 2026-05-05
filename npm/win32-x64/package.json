@@ -1,10 +1,11 @@
 {
   "name": "@cloudcent/cli-win32-x64",
-  "version": "0.0.1-beta",
+  "version": "0.0.3-beta",
   "description": "cloudcent CLI binary for Windows x64",
   "license": "MIT",
   "os": ["win32"],
   "cpu": ["x64"],
+  "files": ["bin/cloudcent.exe"],
   "bin": { "cloudcent": "bin/cloudcent.exe" },
   "publishConfig": { "access": "public" }
 }

@@ -17,84 +17,93 @@ jobs:
     strategy:
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
+          - goos: linux
+            goarch: amd64
             os: ubuntu-latest
-            archive: cloudcent-linux-x86_64.tar.gz
             npm_dir: linux-x64
             binary: cloudcent
-          - target: aarch64-unknown-linux-gnu
+            archive_ext: tar.gz
+          - goos: linux
+            goarch: arm64
             os: ubuntu-latest
-            archive: cloudcent-linux-aarch64.tar.gz
             npm_dir: linux-arm64
             binary: cloudcent
-          - target: x86_64-apple-darwin
+            archive_ext: tar.gz
+          - goos: darwin
+            goarch: amd64
             os: macos-latest
-            archive: cloudcent-macos-x86_64.tar.gz
             npm_dir: darwin-x64
             binary: cloudcent
-          - target: aarch64-apple-darwin
+            archive_ext: tar.gz
+          - goos: darwin
+            goarch: arm64
             os: macos-latest
-            archive: cloudcent-macos-aarch64.tar.gz
             npm_dir: darwin-arm64
             binary: cloudcent
-          - target: x86_64-pc-windows-msvc
+            archive_ext: tar.gz
+          - goos: windows
+            goarch: amd64
             os: windows-latest
-            archive: cloudcent-windows-x86_64.zip
             npm_dir: win32-x64
             binary: cloudcent.exe
-          - target: aarch64-pc-windows-msvc
+            archive_ext: zip
+          - goos: windows
+            goarch: arm64
             os: windows-latest
-            archive: cloudcent-windows-aarch64.zip
             npm_dir: win32-arm64
             binary: cloudcent.exe
+            archive_ext: zip
 
     runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
         with:
-          targets: ${{ matrix.target }}
-
-      - name: Install cross-compilation tools (Linux aarch64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          go-version-file: go.mod
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
         env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          VERSION="${{ inputs.tag }}"
+          VERSION="${VERSION#v}"
+          go build -ldflags "-s -w -X github.com/OverloadBlitz/cloudcent-cli/cmd.Version=${VERSION}" -o ${{ matrix.binary }} ./main.go
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czf ../../../${{ matrix.archive }} cloudcent
-          cd ../../..
+          VERSION="${{ inputs.tag }}"
+          VERSION="${VERSION#v}"
+          ARCHIVE="cloudcent_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
+          tar czf "${ARCHIVE}" ${{ matrix.binary }}
+          echo "ARCHIVE=${ARCHIVE}" >> $GITHUB_ENV
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path "target/${{ matrix.target }}/release/cloudcent.exe" -DestinationPath "${{ matrix.archive }}"
+          $version = "${{ inputs.tag }}".TrimStart('v')
+          $archive = "cloudcent_${version}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
+          Compress-Archive -Path "${{ matrix.binary }}" -DestinationPath $archive
+          "ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Prepare npm package
         shell: bash
         run: |
           mkdir -p npm/${{ matrix.npm_dir }}/bin
-          cp target/${{ matrix.target }}/release/${{ matrix.binary }} npm/${{ matrix.npm_dir }}/bin/
+          cp ${{ matrix.binary }} npm/${{ matrix.npm_dir }}/bin/
 
-      - name: Upload artifact
+      - name: Upload archive artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.archive }}
-          path: ${{ matrix.archive }}
+          name: archive-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: "cloudcent_*.${{ matrix.archive_ext }}"
 
-      - name: Upload npm package
+      - name: Upload npm artifact
         uses: actions/upload-artifact@v4
         with:
           name: npm-${{ matrix.npm_dir }}
@@ -113,21 +122,15 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
+          pattern: archive-*
           merge-multiple: true
           path: artifacts
-
-      - name: Collect release archives
-        run: |
-          find artifacts -name "*.tar.gz" -o -name "*.zip" | head -20
-          cp artifacts/*.tar.gz artifacts/*.zip . 2>/dev/null || true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag }}
-          files: |
-            *.tar.gz
-            *.zip
+          files: artifacts/*
           generate_release_notes: true
 
   publish-npm:
@@ -166,136 +169,75 @@ jobs:
       - name: Generate cloudcent.js launcher
         run: |
           mkdir -p npm/cloudcent/bin
-          node -e "
-            const fs = require('fs');
-            const script = [
-              '#!/usr/bin/env node',
-              '',
-              'const { spawnSync } = require(\"child_process\");',
-              'const path = require(\"path\");',
-              'const os = require(\"os\");',
-              '',
-              'const PLATFORMS = {',
-              '  \"darwin-arm64\":  \"@cloudcent/cli-darwin-arm64\",',
-              '  \"darwin-x64\":    \"@cloudcent/cli-darwin-x64\",',
-              '  \"linux-arm64\":   \"@cloudcent/cli-linux-arm64\",',
-              '  \"linux-x64\":     \"@cloudcent/cli-linux-x64\",',
-              '  \"win32-arm64\":   \"@cloudcent/cli-win32-arm64\",',
-              '  \"win32-x64\":     \"@cloudcent/cli-win32-x64\",',
-              '};',
-              '',
-              'const platform = \`\${os.platform()}-\${os.arch()}\`;',
-              'const pkg = PLATFORMS[platform];',
-              '',
-              'if (!pkg) {',
-              '  console.error(\`Unsupported platform: \${platform}\`);',
-              '  process.exit(1);',
-              '}',
-              '',
-              'const binName = os.platform() === \"win32\" ? \"cloudcent.exe\" : \"cloudcent\";',
-              '',
-              'let binPath;',
-              'try {',
-              '  binPath = path.join(',
-              '    path.dirname(require.resolve(\`\${pkg}/package.json\`)),',
-              '    \"bin\",',
-              '    binName',
-              '  );',
-              '} catch {',
-              '  console.error(',
-              '    \`Could not find binary package \${pkg}.\\n\` +',
-              '    \`Try reinstalling: npm install -g @cloudcent/cli\`',
-              '  );',
-              '  process.exit(1);',
-              '}',
-              '',
-              'const result = spawnSync(binPath, process.argv.slice(2), {',
-              '  stdio: \"inherit\",',
-              '  env: process.env,',
-              '});',
-              '',
-              'process.exit(result.status ?? 1);',
-            ].join('\n');
-            fs.writeFileSync('npm/cloudcent/bin/cloudcent.js', script + '\n');
-            fs.chmodSync('npm/cloudcent/bin/cloudcent.js', 0o755);
-          "
-          echo "==> Generated cloudcent.js:"
-          ls -la npm/cloudcent/bin/cloudcent.js
-          head -3 npm/cloudcent/bin/cloudcent.js
+          cat > npm/cloudcent/bin/cloudcent.js << 'EOF'
+          #!/usr/bin/env node
+
+          const { spawnSync } = require("child_process");
+          const path = require("path");
+          const os = require("os");
+
+          const PLATFORMS = {
+            "darwin-arm64": "@cloudcent/cli-darwin-arm64",
+            "darwin-x64":   "@cloudcent/cli-darwin-x64",
+            "linux-arm64":  "@cloudcent/cli-linux-arm64",
+            "linux-x64":    "@cloudcent/cli-linux-x64",
+            "win32-arm64":  "@cloudcent/cli-win32-arm64",
+            "win32-x64":    "@cloudcent/cli-win32-x64",
+          };
+
+          const platform = `${os.platform()}-${os.arch()}`;
+          const pkg = PLATFORMS[platform];
+
+          if (!pkg) {
+            console.error(`Unsupported platform: ${platform}`);
+            process.exit(1);
+          }
+
+          const binName = os.platform() === "win32" ? "cloudcent.exe" : "cloudcent";
+
+          let binPath;
+          try {
+            binPath = path.join(
+              path.dirname(require.resolve(`${pkg}/package.json`)),
+              "bin",
+              binName
+            );
+          } catch {
+            console.error(
+              `Could not find binary package ${pkg}.\n` +
+              `Try reinstalling: npm install -g @cloudcent/cli`
+            );
+            process.exit(1);
+          }
+
+          const result = spawnSync(binPath, process.argv.slice(2), {
+            stdio: "inherit",
+            env: process.env,
+          });
+
+          process.exit(result.status ?? 1);
+          EOF
+          chmod +x npm/cloudcent/bin/cloudcent.js
 
       - name: Local pack & install test (linux-x64)
         run: |
-          echo "==> Packing platform package..."
-          cd npm/linux-x64
-          PLATFORM_TGZ=$(npm pack 2>&1 | tail -1)
-          cd ../..
-
-          echo "==> Packing main package..."
-          cd npm/cloudcent
-          MAIN_TGZ=$(npm pack 2>&1 | tail -1)
-          cd ../..
-
-          echo "==> Installing locally..."
+          cd npm/linux-x64 && PLATFORM_TGZ=$(npm pack 2>&1 | tail -1) && cd ../..
+          cd npm/cloudcent && MAIN_TGZ=$(npm pack 2>&1 | tail -1) && cd ../..
           npm install -g "npm/linux-x64/${PLATFORM_TGZ}"
           npm install -g "npm/cloudcent/${MAIN_TGZ}"
-
-          echo "==> Verifying cloudcent command..."
           which cloudcent
           cloudcent --help || true
+          npm uninstall -g @cloudcent/cli @cloudcent/cli-linux-x64
 
-          echo "==> Cleaning up..."
-          npm uninstall -g @cloudcent/cli
-          npm uninstall -g @cloudcent/cli-linux-x64
-
-          echo "==> Local test passed!"
-
-      - name: Publish darwin-arm64
+      - name: Publish platform packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: cd npm/darwin-arm64 && npm publish --access public
-
-      - name: Wait for registry
-        run: sleep 30
-
-      - name: Publish darwin-x64
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: cd npm/darwin-x64 && npm publish --access public
-
-      - name: Wait for registry
-        run: sleep 30
-
-      - name: Publish linux-arm64
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: cd npm/linux-arm64 && npm publish --access public
-
-      - name: Wait for registry
-        run: sleep 30
-
-      - name: Publish linux-x64
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: cd npm/linux-x64 && npm publish --access public
-
-      - name: Wait for registry
-        run: sleep 30
-
-      - name: Publish win32-arm64
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: cd npm/win32-arm64 && npm publish --access public
-
-      - name: Wait for registry
-        run: sleep 30
-
-      - name: Publish win32-x64
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: cd npm/win32-x64 && npm publish --access public
-
-      - name: Wait for registry
-        run: sleep 30
+        run: |
+          for dir in npm/darwin-arm64 npm/darwin-x64 npm/linux-arm64 npm/linux-x64 npm/win32-arm64 npm/win32-x64; do
+            echo "Publishing ${dir}..."
+            (cd "${dir}" && npm publish --access public)
+            sleep 30
+          done
 
       - name: Publish main package
         env:
@@ -303,10 +245,7 @@ jobs:
         run: |
           VERSION="${{ inputs.tag }}"
           VERSION="${VERSION#v}"
-
           cd npm/cloudcent
-
-          # Update version in main package and optional deps
           node -e "
             const pkg = require('./package.json');
             pkg.version = '${VERSION}';
@@ -315,14 +254,6 @@ jobs:
             }
             require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
-
-          # Verify bin/cloudcent.js is included before publishing
-          echo "==> Verifying package contents..."
           npm pack --dry-run 2>&1 | tee /tmp/pack-contents.txt
-          if ! grep -q "bin/cloudcent.js" /tmp/pack-contents.txt; then
-            echo "ERROR: bin/cloudcent.js not found in package contents!"
-            exit 1
-          fi
-          echo "==> bin/cloudcent.js confirmed in package."
-
+          grep -q "bin/cloudcent.js" /tmp/pack-contents.txt || { echo "ERROR: bin/cloudcent.js missing!"; exit 1; }
           npm publish --access public

@@ -1,5 +1,7 @@
-# Build
-/target
+# Build output
+/dist/
+/cloudcent
+/cloudcent-go
 
 # IDE
 .idea/
@@ -9,15 +11,20 @@
 .DS_Store
 Thumbs.db
 
+# Go test cache
+*.test
+
 # Metadata / data exports
 metadata_export.json
 
 # Debug / build artifacts
 build_log.txt
-cargo_found.txt
-cargo_search.txt
 *.bat
 null
 
-# npm platform binaries (populated by CI)
+# npm platform binaries (populated by CI / copy-npm-bins.sh)
 npm/*/bin/
+
+# Python (legacy)
+.venv/
+__pycache__/
