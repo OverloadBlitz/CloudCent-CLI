@@ -68,6 +68,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
+        shell: bash
         run: |
           VERSION="${{ inputs.tag }}"
           VERSION="${VERSION#v}"
