@@ -8,6 +8,7 @@ import (
 
 	"github.com/OverloadBlitz/cloudcent-cli/internal/api"
 	"github.com/OverloadBlitz/cloudcent-cli/internal/pulumi/resources"
+	"github.com/shopspring/decimal"
 )
 
 type batchPricingFetcher interface {
@@ -16,9 +17,72 @@ type batchPricingFetcher interface {
 
 const defaultBatchPriceFilter = ">=0"
 
+// hoursPerMonth is the standard monthly hours used for all hourly→monthly conversions.
+const hoursPerMonth = 730
+
 // defaultUsageQty is the monthly quantity assumed when the user does not
 // provide a usage value for a usage-based resource (e.g. API Gateway requests).
 const defaultUsageQty = 1_000_000
+
+// serviceUsageDefaults maps "Service/SubLabel" (or just "Service") to a
+// sensible per-service default monthly quantity. More specific keys
+// (Service/SubLabel) take precedence over the bare Service key.
+// All quantities are in the unit returned by the pricing API for that resource.
+var serviceUsageDefaults = map[string]float64{
+	// S3 — GB-Mo / requests
+	"S3/Storage":      100,
+	"S3/Requests-PUT": 10_000,
+	"S3/Requests-GET": 100_000,
+
+	// Lambda — requests / GB-seconds
+	"Lambda/Requests": 1_000_000,
+	"Lambda/Duration": 400_000, // GB-seconds
+
+	// SNS — publish requests
+	"SNS/Requests": 1_000_000,
+
+	// API Gateway — requests
+	"API Gateway/Requests": 1_000_000,
+
+	// AppSync — invocations
+	"AppSync/Invocations": 1_000_000,
+
+	// DynamoDB — GB-Mo
+	"DynamoDB/Storage":     25,
+	"DynamoDB/PITR Backup": 25,
+
+	// CloudWatch Logs — GB
+	"CloudWatch Logs/Ingestion": 10,
+	"CloudWatch Logs/Storage":   10,
+
+	// CloudWatch Metric Streams — metric updates/mo
+	"CloudWatch Metric Streams": 100_000,
+
+	// CloudWatch Alarms — 1 Pulumi resource = 1 alarm = $0.10/mo
+	"aws:cloudwatch/metricAlarm:MetricAlarm":       1,
+	"aws:cloudwatch/compositeAlarm:CompositeAlarm": 1,
+
+	// CloudWatch Dashboard — 1 resource = 730 dashboard-hours/mo (1 dashboard × 1 month)
+	"aws:cloudwatch/dashboard:Dashboard": 730,
+
+	// CloudWatch Contributor Insights — rules / events
+	"CloudWatch Contributor Insights/Rule":           5,
+	"CloudWatch Contributor Insights/Matched Events": 1_000_000,
+
+	// CloudWatch Internet Monitor
+	"CloudWatch Internet Monitor/Monitored Resources": 10,
+	"CloudWatch Internet Monitor/City Networks":       1_000,
+
+	// EventBridge
+	"EventBridge/Archive Events": 1_000_000,
+	"EventBridge/Storage":        25,
+
+	// DynamoDB sub-resources
+	"DynamoDB/Stream Reads":         1_000_000,
+	"DynamoDB/Kinesis Data Capture": 1_000_000,
+	"DynamoDB/Full Export":          100, // GB
+	"DynamoDB/Incremental Export":   10,  // GB
+}
 
 // hourlyUnits are unit strings that indicate time-based (per-hour) pricing.
 // Any unit NOT in this set is treated as usage-based.
@@ -160,13 +224,13 @@ func EstimateAllResources(client batchPricingFetcher, records []resources.Decode
 		}
 
 		if isUsage {
-			qty, isDefault := resolveUsageQty(record.Name, usageMap)
+			qty, isDefault := resolveUsageQty(record.Name, record.Service, record.SubLabel, record.RawType, usageMap)
 			est.UsageQty = qty
 			est.UsageDefault = isDefault
 			est.UsageMonthly = calcUsageMonthlyCost(entries, qty)
 			// Clear OnDemandRate for usage-based resources so the hourly
 			// totals box doesn't include them.
-			est.OnDemandRate = 0
+			est.OnDemandRate = decimal.Zero
 		}
 
 		result = append(result, est)
@@ -176,10 +240,10 @@ func EstimateAllResources(client batchPricingFetcher, records []resources.Decode
 }
 
 // buildPriceEntries converts an api.PricingItem into a sorted slice of PriceEntry.
-// OnDemand is always first; the rest are sorted by model then rate.
-func buildPriceEntries(item api.PricingItem) ([]resources.PriceEntry, float64) {
+// OnDemand is always first; the rest are sorted by model name, then rate.
+func buildPriceEntries(item api.PricingItem) ([]resources.PriceEntry, decimal.Decimal) {
 	var entries []resources.PriceEntry
-	var onDemandRate float64
+	var onDemandRate decimal.Decimal
 
 	for _, p := range item.Prices {
 		model := ""
@@ -203,13 +267,15 @@ func buildPriceEntries(item api.PricingItem) ([]resources.PriceEntry, float64) {
 			unit = *p.Unit
 		}
 
-		rate := 0.0
+		rate := decimal.Zero
 		if len(p.Rates) > 0 && p.Rates[0].Price != nil {
-			fmt.Sscanf(p.Rates[0].Price.String(), "%f", &rate)
+			if d, err := decimal.NewFromString(p.Rates[0].Price.String()); err == nil {
+				rate = d
+			}
 		}
 
 		isCurrent := strings.EqualFold(model, "OnDemand")
-		if isCurrent && rate > onDemandRate {
+		if isCurrent && rate.GreaterThan(onDemandRate) {
 			onDemandRate = rate
 		}
 
@@ -254,13 +320,12 @@ func buildPriceEntries(item api.PricingItem) ([]resources.PriceEntry, float64) {
 		if entries[i].Model != entries[j].Model {
 			return entries[i].Model < entries[j].Model
 		}
-		return entries[i].RatePerHr < entries[j].RatePerHr
+		return entries[i].RatePerHr.LessThan(entries[j].RatePerHr)
 	})
 
 	return entries, onDemandRate
 }
 
-// allZeroRates returns true when every entry has a zero hourly rate,
 // allZeroRates returns true when every entry has a zero rate across all tiers,
 // meaning the resource is effectively free. For tiered pricing, any non-zero
 // tier price means the resource is not free (the zero tier is just a free allowance).
@@ -269,14 +334,12 @@ func allZeroRates(entries []resources.PriceEntry) bool {
 		return false
 	}
 	for _, e := range entries {
-		if e.RatePerHr != 0 {
+		if !e.RatePerHr.IsZero() {
 			return false
 		}
 		// Check tiered pricing — a non-zero price in any tier means not free.
 		for _, t := range e.Tiers {
-			p := 0.0
-			fmt.Sscanf(t.Price, "%f", &p)
-			if p != 0 {
+			if d, err := decimal.NewFromString(t.Price); err == nil && !d.IsZero() {
 				return false
 			}
 		}
@@ -310,7 +373,10 @@ func pricingItemMatchesRecord(item api.PricingItem, record resources.DecodedReso
 	if record.Region != "" && !equalFoldTrim(item.Region, record.Region) {
 		return false
 	}
-	if record.Service != "" && !equalFoldTrim(item.Product, record.Service) {
+	// Only enforce product match when both sides are non-empty.
+	// Some APIs return product="" for certain services (e.g. DynamoDB); in
+	// that case we fall through to attr-level matching.
+	if record.Service != "" && item.Product != "" && !equalFoldTrim(item.Product, record.Service) {
 		return false
 	}
 
@@ -391,20 +457,42 @@ func detectUsageBased(entries []resources.PriceEntry) (bool, string) {
 }
 
 // resolveUsageQty returns the monthly quantity to use for a resource.
-// It checks usageMap first; if not found it returns the default and isDefault=true.
-func resolveUsageQty(resourceName string, usageMap map[string]float64) (qty float64, isDefault bool) {
+// Priority: usageMap (user-supplied) > rawType key > service/subLabel key > service key > global default.
+// All keys are looked up in serviceUsageDefaults — rawType (e.g. "aws:cloudwatch/metricAlarm:MetricAlarm"),
+// "Service/SubLabel", and bare "Service" are all valid keys in that map.
+func resolveUsageQty(resourceName, service, subLabel, rawType string, usageMap map[string]float64) (qty float64, isDefault bool) {
+	// 1. User-supplied value takes highest priority.
 	if usageMap != nil {
 		if v, ok := usageMap[resourceName]; ok && v > 0 {
 			return v, false
 		}
 	}
+	// 2. rawType exact match (e.g. "aws:cloudwatch/metricAlarm:MetricAlarm" → 1).
+	if rawType != "" {
+		if v, ok := serviceUsageDefaults[rawType]; ok {
+			return v, true
+		}
+	}
+	// 3. Per-service/subLabel default.
+	if subLabel != "" {
+		if v, ok := serviceUsageDefaults[service+"/"+subLabel]; ok {
+			return v, true
+		}
+	}
+	// 4. Per-service default (bare key).
+	if service != "" {
+		if v, ok := serviceUsageDefaults[service]; ok {
+			return v, true
+		}
+	}
+	// 5. Global fallback.
 	return defaultUsageQty, true
 }
 
 // calcUsageMonthlyCost computes the monthly cost for a usage-based resource
 // given a monthly quantity. It uses the OnDemand entry's tiers when available,
 // otherwise falls back to the flat rate.
-func calcUsageMonthlyCost(entries []resources.PriceEntry, monthlyQty float64) float64 {
+func calcUsageMonthlyCost(entries []resources.PriceEntry, monthlyQty float64) decimal.Decimal {
 	// Find the OnDemand entry.
 	var target *resources.PriceEntry
 	for i := range entries {
@@ -417,35 +505,41 @@ func calcUsageMonthlyCost(entries []resources.PriceEntry, monthlyQty float64) fl
 		target = &entries[0]
 	}
 	if target == nil {
-		return 0
+		return decimal.Zero
 	}
+
+	qty := decimal.NewFromFloat(monthlyQty)
 
 	if len(target.Tiers) == 0 {
 		// Flat rate: price per unit × quantity.
-		return target.RatePerHr * monthlyQty
+		return target.RatePerHr.Mul(qty)
 	}
 
 	// Tiered pricing: walk through tiers and accumulate cost.
-	return calcTieredCost(target.Tiers, monthlyQty)
+	return calcTieredCost(target.Tiers, qty)
 }
 
 // calcTieredCost applies volume-tiered pricing to a total quantity.
 // Each tier covers [startRange, endRange) units at its price.
-func calcTieredCost(tiers []resources.RateTier, totalQty float64) float64 {
+func calcTieredCost(tiers []resources.RateTier, totalQty decimal.Decimal) decimal.Decimal {
 	remaining := totalQty
-	total := 0.0
+	total := decimal.Zero
 
 	for _, tier := range tiers {
-		if remaining <= 0 {
+		if remaining.IsZero() || remaining.IsNegative() {
 			break
 		}
 
-		price := 0.0
-		fmt.Sscanf(tier.Price, "%f", &price)
+		price, err := decimal.NewFromString(tier.Price)
+		if err != nil {
+			continue
+		}
 
-		start := 0.0
+		start := decimal.Zero
 		if tier.StartRange != "" {
-			fmt.Sscanf(tier.StartRange, "%f", &start)
+			if d, err := decimal.NewFromString(tier.StartRange); err == nil {
+				start = d
+			}
 		}
 
 		// endRange of "" or "Inf" means unlimited.
@@ -453,25 +547,24 @@ func calcTieredCost(tiers []resources.RateTier, totalQty float64) float64 {
 			strings.EqualFold(tier.EndRange, "inf") ||
 			strings.EqualFold(tier.EndRange, "infinity")
 
-		var tierSize float64
+		var tierSize decimal.Decimal
 		if isInf {
 			tierSize = remaining
 		} else {
-			end := 0.0
-			if _, err := fmt.Sscanf(tier.EndRange, "%f", &end); err == nil {
-				tierSize = end - start
+			if end, err := decimal.NewFromString(tier.EndRange); err == nil {
+				tierSize = end.Sub(start)
 			} else {
 				tierSize = remaining
 			}
 		}
 
 		units := remaining
-		if units > tierSize {
+		if units.GreaterThan(tierSize) {
 			units = tierSize
 		}
 
-		total += price * units
-		remaining -= units
+		total = total.Add(price.Mul(units))
+		remaining = remaining.Sub(units)
 	}
 
 	return total

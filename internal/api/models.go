@@ -156,12 +156,15 @@ type PulumiAttrMapping struct {
 }
 
 // DrawioResourceDef describes how a draw.io service stencil maps to the
-// pricing API. The key in MetadataResponse.DrawioResources is the draw.io
-// service suffix produced by DetectService (e.g. "ec2", "api_gateway").
+// pricing API. The key in MetadataResponse.DrawioResources is the full
+// normalised shape key produced by normaliseShapeKey, e.g.
+// "mxgraph.aws4.ec2_instance". This matches the draw.io raw data parquet
+// key (services + "." + product).
 type DrawioResourceDef struct {
-	Provider string                       `json:"provider"`
-	Product  string                       `json:"product,omitempty"`
-	Attrs    map[string]DrawioAttrMapping `json:"attrs"`
+	Provider   string                       `json:"provider"`
+	Product    string                       `json:"product,omitempty"`
+	PulumiType string                       `json:"pulumi_type,omitempty"` // optional: inherit attrs from pulumi_resource_map
+	Attrs      map[string]DrawioAttrMapping `json:"attrs"`
 }
 
 // DrawioAttrMapping describes a single pricing attribute for a draw.io resource.

@@ -56,82 +56,97 @@ func TestDetectServiceFromShape(t *testing.T) {
 		style        string
 		wantService  string
 		wantProvider string
+		wantShapeKey string
 	}{
 		"aws4 resIcon wins over generic shape": {
 			label:        "Amazon S3",
 			style:        "sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#E7157B;strokeColor=#fff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=12;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.s3;",
 			wantService:  "s3",
 			wantProvider: "aws",
+			wantShapeKey: "mxgraph.aws4.s3",
 		},
 		"aws4 plain shape suffix": {
 			label:        "EIP",
 			style:        "shape=mxgraph.aws4.elastic_ip_address;fillColor=#E7157B;strokeColor=#fff;",
 			wantService:  "elastic_ip_address",
 			wantProvider: "aws",
+			wantShapeKey: "mxgraph.aws4.elastic_ip_address",
 		},
 		"aws3 maps to aws provider": {
 			label:        "S3 (legacy stencil)",
 			style:        "shape=mxgraph.aws3.s3;",
 			wantService:  "s3",
 			wantProvider: "aws",
+			wantShapeKey: "mxgraph.aws3.s3",
 		},
 		"azure stencil maps to azure provider": {
 			label:        "VM",
 			style:        "shape=mxgraph.azure.virtual_machine;fillColor=#0078D7;",
 			wantService:  "virtual_machine",
 			wantProvider: "azure",
+			wantShapeKey: "mxgraph.azure.virtual_machine",
 		},
 		"gcp stencil maps to gcp provider": {
 			label:        "GCE",
 			style:        "shape=mxgraph.gcp.compute_engine;",
 			wantService:  "compute_engine",
 			wantProvider: "gcp",
+			wantShapeKey: "mxgraph.gcp.compute_engine",
 		},
 		"oci stencil maps to oci provider": {
 			label:        "OCI Compute",
 			style:        "shape=mxgraph.oci.compute;",
 			wantService:  "compute",
 			wantProvider: "oci",
+			wantShapeKey: "mxgraph.oci.compute",
 		},
 		"grIcon group shape": {
 			label:        "Auto Scaling group",
 			style:        "points=[[0,0]];outlineConnect=0;gradientColor=none;html=1;whiteSpace=wrap;fontSize=12;fontStyle=0;container=1;pointerEvents=0;collapsible=0;recursiveResize=0;shape=mxgraph.aws4.group;grIcon=mxgraph.aws4.group_auto_scaling_group;",
 			wantService:  "group_auto_scaling_group",
 			wantProvider: "aws",
+			wantShapeKey: "mxgraph.aws4.group_auto_scaling_group",
 		},
 		"prIcon productIcon wrapper": {
 			label:        "Elastic Load Balancing",
 			style:        "outlineConnect=0;fontColor=#D05C17;gradientColor=#F78E04;strokeColor=#ffffff;fillColor=#D05C17;dashed=0;verticalLabelPosition=middle;verticalAlign=middle;align=left;html=1;whiteSpace=wrap;fontSize=16;fontStyle=0;shape=mxgraph.aws4.productIcon;prIcon=mxgraph.aws4.elastic_load_balancing;",
 			wantService:  "elastic_load_balancing",
 			wantProvider: "aws",
+			wantShapeKey: "mxgraph.aws4.elastic_load_balancing",
 		},
 		"label is ignored when style is empty": {
 			label:        "EC2 Instance",
 			style:        "",
 			wantService:  "",
 			wantProvider: "",
+			wantShapeKey: "",
 		},
 		"label is ignored even when it names a service": {
 			label:        "Amazon S3 Bucket",
 			style:        "",
 			wantService:  "",
 			wantProvider: "",
+			wantShapeKey: "",
 		},
 		"unknown stencil prefix returns lowercased suffix and empty provider": {
 			label:        "custom",
 			style:        "shape=stencil(myCustomShape);",
 			wantService:  "stencil(mycustomshape)",
 			wantProvider: "",
+			wantShapeKey: "stencil(mycustomshape)",
 		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			gotService, gotProvider := DetectService(tc.label, tc.style)
+			gotService, gotProvider, gotShapeKey := DetectService(tc.label, tc.style)
 			if gotService != tc.wantService {
 				t.Errorf("DetectService(%q, %q) service = %q, want %q", tc.label, tc.style, gotService, tc.wantService)
 			}
 			if gotProvider != tc.wantProvider {
 				t.Errorf("DetectService(%q, %q) provider = %q, want %q", tc.label, tc.style, gotProvider, tc.wantProvider)
+			}
+			if gotShapeKey != tc.wantShapeKey {
+				t.Errorf("DetectService(%q, %q) shapeKey = %q, want %q", tc.label, tc.style, gotShapeKey, tc.wantShapeKey)
 			}
 		})
 	}

@@ -11,7 +11,7 @@ import (
 func TestGenerateSpecFromDrawioResources(t *testing.T) {
 	meta := &api.MetadataResponse{
 		DrawioResources: map[string]api.DrawioResourceDef{
-			"ec2": {
+			"mxgraph.aws4.ec2_instance": {
 				Provider: "aws",
 				Product:  "ec2",
 				Attrs: map[string]api.DrawioAttrMapping{
@@ -20,7 +20,7 @@ func TestGenerateSpecFromDrawioResources(t *testing.T) {
 					"tenancy":       {Default: "Shared"},
 				},
 			},
-			"s3": {
+			"mxgraph.aws4.s3": {
 				Provider: "aws",
 				Product:  "s3",
 				Attrs: map[string]api.DrawioAttrMapping{
@@ -43,10 +43,10 @@ func TestGenerateSpecFromDrawioResources(t *testing.T) {
 
 	d := &Diagram{
 		Components: []Component{
-			{ID: "1", Label: "web", ServiceType: "ec2"},
-			{ID: "2", Label: "static-files", ServiceType: "s3"},
-			{ID: "3", Label: "main vpc", ServiceType: "virtual_private_cloud"},
-			{ID: "4", Label: "mystery", ServiceType: ""},
+			{ID: "1", Label: "web", ServiceType: "ec2_instance", ShapeKey: "mxgraph.aws4.ec2_instance", Provider: "aws"},
+			{ID: "2", Label: "static-files", ServiceType: "s3", ShapeKey: "mxgraph.aws4.s3", Provider: "aws"},
+			{ID: "3", Label: "main vpc", ServiceType: "virtual_private_cloud", ShapeKey: "mxgraph.aws4.virtual_private_cloud", Provider: "aws"},
+			{ID: "4", Label: "mystery", ServiceType: "", ShapeKey: ""},
 		},
 	}
 
@@ -62,6 +62,9 @@ func TestGenerateSpecFromDrawioResources(t *testing.T) {
 	ec2 := spec.Components[0]
 	if ec2.NoPricing {
 		t.Error("EC2 should be billable")
+	}
+	if ec2.ShapeKey != "mxgraph.aws4.ec2_instance" {
+		t.Errorf("EC2 ShapeKey = %q, want mxgraph.aws4.ec2_instance", ec2.ShapeKey)
 	}
 	if _, ok := ec2.Attrs["instance_type"]; !ok {
 		t.Error("EC2 spec should expose instance_type attr from DrawioResources")
@@ -96,8 +99,8 @@ func TestGenerateSpecWithoutMetadata(t *testing.T) {
 	// Without metadata, all components should be NoPricing.
 	d := &Diagram{
 		Components: []Component{
-			{ID: "1", Label: "web", ServiceType: "ec2"},
-			{ID: "2", Label: "vpc", ServiceType: "virtual_private_cloud"},
+			{ID: "1", Label: "web", ServiceType: "ec2_instance", ShapeKey: "mxgraph.aws4.ec2_instance"},
+			{ID: "2", Label: "vpc", ServiceType: "virtual_private_cloud", ShapeKey: "mxgraph.aws4.virtual_private_cloud"},
 		},
 	}
 
@@ -116,7 +119,7 @@ func TestGenerateSpecWithoutMetadata(t *testing.T) {
 func TestWriteSpecEmitsExampleComments(t *testing.T) {
 	meta := &api.MetadataResponse{
 		DrawioResources: map[string]api.DrawioResourceDef{
-			"ec2": {
+			"mxgraph.aws4.ec2_instance": {
 				Provider: "aws",
 				Product:  "ec2",
 				Attrs: map[string]api.DrawioAttrMapping{
@@ -136,7 +139,7 @@ func TestWriteSpecEmitsExampleComments(t *testing.T) {
 
 	d := &Diagram{
 		Components: []Component{
-			{ID: "1", Label: "web", ServiceType: "ec2"},
+			{ID: "1", Label: "web", ServiceType: "ec2_instance", ShapeKey: "mxgraph.aws4.ec2_instance", Provider: "aws"},
 		},
 	}
 	spec := GenerateSpec(d, meta, "us-east-1")
@@ -161,7 +164,7 @@ func TestWriteSpecEmitsExampleComments(t *testing.T) {
 func TestWriteSpecOmitsCommentsWithoutMetadata(t *testing.T) {
 	d := &Diagram{
 		Components: []Component{
-			{ID: "1", Label: "web", ServiceType: "ec2"},
+			{ID: "1", Label: "web", ServiceType: "ec2_instance", ShapeKey: "mxgraph.aws4.ec2_instance"},
 		},
 	}
 	spec := GenerateSpec(d, nil, "us-east-1")
@@ -176,8 +179,8 @@ func TestWriteSpecOmitsCommentsWithoutMetadata(t *testing.T) {
 		t.Errorf("expected no example comments without metadata, got:\n%s", out)
 	}
 	// EC2 should still appear, but as noPricing since no metadata.
-	if !strings.Contains(out, "service: ec2") {
-		t.Errorf("expected ec2 service entry, got:\n%s", out)
+	if !strings.Contains(out, "service: ec2_instance") {
+		t.Errorf("expected ec2_instance service entry, got:\n%s", out)
 	}
 	if !strings.Contains(out, "noPricing: true") {
 		t.Errorf("expected noPricing: true without metadata, got:\n%s", out)

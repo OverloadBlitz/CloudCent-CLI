@@ -90,7 +90,8 @@ Found a bug or have a feature request? [Open an issue](https://github.com/Overlo
 - Any relevant error output or screenshots
 
 ## Honorable Mention
-The 0.0.2-beta-legacy branch includes a deprecated TUI for querying cloud costs across providers.
+The `0.0.2-beta-legacy` branch includes a deprecated TUI for querying cloud costs across providers. It is no longer supported due to changes in the pricing data model, but remains noted here as an honorable mention.
+This CLI also has a TUI mode, I just disabled it for now and am still working on it
 
 ## License
 

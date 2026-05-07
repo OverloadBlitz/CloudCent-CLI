@@ -102,8 +102,8 @@ func TestEstimateAllResourcesMatchesPricingItemsByResourceFields(t *testing.T) {
 	if result.Prices[0].Model != "OnDemand" {
 		t.Fatalf("expected first price model OnDemand, got %q", result.Prices[0].Model)
 	}
-	if result.Prices[0].RatePerHr != 0.0104 {
-		t.Fatalf("expected OnDemand rate 0.0104, got %f", result.Prices[0].RatePerHr)
+	if result.Prices[0].RatePerHr.String() != "0.0104" {
+		t.Fatalf("expected OnDemand rate 0.0104, got %s", result.Prices[0].RatePerHr.String())
 	}
 	if !result.Prices[0].IsCurrent {
 		t.Fatalf("expected OnDemand price to be marked as current")
@@ -157,8 +157,8 @@ func TestEstimateAllResourcesMatchesPricingItemsIgnoringCase(t *testing.T) {
 		t.Fatalf("expected 1 estimate result, got %d", len(results))
 	}
 
-	if results[0].OnDemandRate != 0.0116 {
-		t.Fatalf("expected mixed-case response to match OnDemand rate 0.0116, got %f", results[0].OnDemandRate)
+	if results[0].OnDemandRate.String() != "0.0116" {
+		t.Fatalf("expected mixed-case response to match OnDemand rate 0.0116, got %s", results[0].OnDemandRate.String())
 	}
 }
 
@@ -215,8 +215,8 @@ func TestEstimateAllResourcesReusesSamePricingItemForDuplicateResources(t *testi
 	}
 
 	for _, result := range results {
-		if result.OnDemandRate != 0.0104 {
-			t.Fatalf("expected duplicated resources to share the same OnDemand rate 0.0104, got %f", result.OnDemandRate)
+		if result.OnDemandRate.String() != "0.0104" {
+			t.Fatalf("expected duplicated resources to share the same OnDemand rate 0.0104, got %s", result.OnDemandRate.String())
 		}
 	}
 }
@@ -234,4 +234,67 @@ func mustAttrValue(t *testing.T, raw string) *api.AttrValue {
 
 func stringPtr(v string) *string {
 	return &v
+}
+
+func TestResolveUsageQty_ServiceSubLabelDefault(t *testing.T) {
+	tests := []struct {
+		name     string
+		service  string
+		subLabel string
+		wantQty  float64
+	}{
+		{"dynamodb storage", "DynamoDB", "Storage", 25},
+		{"dynamodb pitr", "DynamoDB", "PITR Backup", 25},
+		{"cloudwatch logs ingestion", "CloudWatch Logs", "Ingestion", 10},
+		{"cloudwatch logs storage", "CloudWatch Logs", "Storage", 10},
+		{"eventbridge archive events", "EventBridge", "Archive Events", 1_000_000},
+		{"eventbridge storage", "EventBridge", "Storage", 25},
+		{"unknown service falls back to global", "SomeUnknownService", "", defaultUsageQty},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			qty, isDefault := resolveUsageQty("any-resource", tt.service, tt.subLabel, "", nil)
+			if qty != tt.wantQty {
+				t.Errorf("qty = %v, want %v", qty, tt.wantQty)
+			}
+			if !isDefault {
+				t.Errorf("expected isDefault=true for default path")
+			}
+		})
+	}
+}
+
+func TestResolveUsageQty_UserSuppliedOverridesDefault(t *testing.T) {
+	usageMap := map[string]float64{"my-table": 500}
+	qty, isDefault := resolveUsageQty("my-table", "DynamoDB", "Storage", "", usageMap)
+	if qty != 500 {
+		t.Errorf("qty = %v, want 500", qty)
+	}
+	if isDefault {
+		t.Errorf("expected isDefault=false for user-supplied value")
+	}
+}
+
+func TestResolveUsageQty_RawTypeOverridesServiceDefault(t *testing.T) {
+	tests := []struct {
+		name    string
+		rawType string
+		wantQty float64
+	}{
+		{"metric alarm = 1", "aws:cloudwatch/metricAlarm:MetricAlarm", 1},
+		{"composite alarm = 1", "aws:cloudwatch/compositeAlarm:CompositeAlarm", 1},
+		{"dashboard = 720", "aws:cloudwatch/dashboard:Dashboard", 720},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			qty, isDefault := resolveUsageQty("any-resource", "", "", tt.rawType, nil)
+			if qty != tt.wantQty {
+				t.Errorf("qty = %v, want %v", qty, tt.wantQty)
+			}
+			if !isDefault {
+				t.Errorf("expected isDefault=true")
+			}
+		})
+	}
 }

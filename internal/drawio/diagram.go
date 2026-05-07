@@ -33,6 +33,7 @@ type Component struct {
 	Height      float64
 	ServiceType string // shape suffix (e.g. "s3", "elastic_ip_address"); "" if unrecognised
 	Provider    string // cloud provider derived from shape prefix (e.g. "aws", "azure", "gcp", "oci"); "" if unknown
+	ShapeKey    string // full normalised shape key, e.g. "mxgraph.aws4.s3"; matches draw_io_resources keys
 }
 
 // Diagram is the result of parsing a .drawio XML file.
@@ -183,7 +184,7 @@ func Parse(xml string) (*Diagram, error) {
 			}
 		} else if isVertex && id != "0" && id != "1" && label != "" {
 			parent := extractAttr(tag, "parent")
-			service, provider := DetectService(label, style)
+			service, provider, shapeKey := DetectService(label, style)
 			d.Components = append(d.Components, Component{
 				ID:          id,
 				ParentID:    parent,
@@ -195,6 +196,7 @@ func Parse(xml string) (*Diagram, error) {
 				Height:      h,
 				ServiceType: service,
 				Provider:    provider,
+				ShapeKey:    shapeKey,
 			})
 		}
 		pos = absTagEnd
@@ -344,18 +346,24 @@ var genericShapeWrappers = map[string]bool{
 	"group":        true,
 }
 
-// DetectService returns the cloud-service identifier and provider carried
-// by the drawio cell's style, e.g. ("s3", "aws") or ("virtual_machine",
-// "azure"). We look at `resIcon`, `grIcon`, `prIcon`, then `shape` in that
-// order — the icon attributes win because generic AWS4 wrapper cells use
+// DetectService returns the cloud-service identifier, provider, and full
+// normalised shape key carried by the drawio cell's style.
+//
+// shapeKey is the complete lower-cased, space-to-underscore normalised shape
+// path, e.g. "mxgraph.aws4.ec2_instance". It matches the keys used in
+// draw_io_resources in the metadata. service is the suffix after the library
+// prefix (e.g. "ec2_instance"), and provider is derived from the prefix
+// (e.g. "aws").
+//
+// We look at `resIcon`, `grIcon`, `prIcon`, then `shape` in that order —
+// the icon attributes win because generic AWS4 wrapper cells use
 // `shape=mxgraph.aws4.resourceIcon` (or `productIcon`/`groupCenter`) with
 // the real service stored in the corresponding `*Icon=mxgraph.aws4.<service>`
-// attribute. If no shape-based service can be derived, both return values
-// are empty. The label is intentionally ignored: hand-typed text is
-// unreliable and would require a hardcoded keyword table.
-func DetectService(label, style string) (service, provider string) {
+// attribute. If no shape-based service can be derived, all return values
+// are empty. The label is intentionally ignored.
+func DetectService(label, style string) (service, provider, shapeKey string) {
 	if style == "" {
-		return "", ""
+		return "", "", ""
 	}
 	for _, key := range []string{"resIcon", "grIcon", "prIcon", "shape"} {
 		raw := styleValue(style, key)
@@ -366,9 +374,11 @@ func DetectService(label, style string) (service, provider string) {
 		if suffix == "" || genericShapeWrappers[strings.ToLower(suffix)] {
 			continue
 		}
-		return suffix, prov
+		// Reconstruct the full normalised key from the raw shape value.
+		fullKey := normaliseShapeKey(raw)
+		return suffix, prov, fullKey
 	}
-	return "", ""
+	return "", "", ""
 }
 
 // styleValue extracts the value of `key=` from a draw.io style string.
@@ -399,4 +409,11 @@ func splitShape(shape string) (suffix, provider string) {
 		}
 	}
 	return s, ""
+}
+
+// normaliseShapeKey converts a raw shape value to the canonical key used in
+// draw_io_resources: lower-cased with spaces replaced by underscores.
+// e.g. "mxgraph.aws4.EC2 Instance" → "mxgraph.aws4.ec2_instance"
+func normaliseShapeKey(raw string) string {
+	return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(raw), " ", "_"))
 }

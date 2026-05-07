@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	internalmodel "github.com/OverloadBlitz/cloudcent-cli/internal/pulumi/resources"
+	awsdecode "github.com/OverloadBlitz/cloudcent-cli/internal/pulumi/resources/aws"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	pulumirpc "github.com/pulumi/pulumi/sdk/v3/proto/go"
 	"google.golang.org/grpc"
@@ -49,6 +50,93 @@ func (c *ResourceCollector) SetStackConfig(cfg map[string]string) {
 	c.mu.Lock()
 	c.stackConfig = cfg
 	c.mu.Unlock()
+}
+
+// InjectECSCrossResourceAttrs performs a post-collection pass that propagates
+// TaskDefinition attributes (cpu, memory, runtimePlatform) into the
+// MockedProperties of every ECS Service that references the definition.
+//
+// This mirrors the DynamoDB GSI pattern: the "child" resource (Service) reads
+// attributes from its "parent" (TaskDefinition) via MockedProperties so that
+// the decoder does not need to re-traverse the full resource graph.
+//
+// Call this once after the Pulumi program has finished running (i.e. after
+// Wait() returns) and before passing records to DecodeAllResources.
+func (c *ResourceCollector) InjectECSCrossResourceAttrs() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Build a name → TaskDefinition record index.
+	// TaskDefinition resources are identified by their Pulumi resource name.
+	taskDefs := make(map[string]*internalmodel.ResourceRecord)
+	for i := range c.Resources {
+		if c.Resources[i].Type == "aws:ecs/taskDefinition:TaskDefinition" {
+			taskDefs[c.Resources[i].Name] = &c.Resources[i]
+		}
+	}
+
+	if len(taskDefs) == 0 {
+		return
+	}
+
+	for i := range c.Resources {
+		rec := &c.Resources[i]
+		if rec.Type != "aws:ecs/service:Service" {
+			continue
+		}
+
+		// The "taskDefinition" input is typically an ARN or a resource name.
+		// We try to match it against known TaskDefinition names.
+		tdRef := awsdecode.ExtractInput(rec.Inputs, "taskDefinition")
+		if tdRef == "" {
+			continue
+		}
+
+		td := resolveTaskDefinition(tdRef, taskDefs)
+		if td == nil {
+			continue
+		}
+
+		if rec.MockedProperties == nil {
+			rec.MockedProperties = make(map[string]string)
+		}
+
+		// cpu and memory are top-level inputs on TaskDefinition (e.g. "256", "512").
+		if v := awsdecode.ExtractInput(td.Inputs, "cpu"); v != "" {
+			rec.MockedProperties["taskCpu"] = v
+		}
+		if v := awsdecode.ExtractInput(td.Inputs, "memory"); v != "" {
+			rec.MockedProperties["taskMemory"] = v
+		}
+
+		// runtimePlatform holds cpuArchitecture and operatingSystemFamily.
+		if v := awsdecode.ExtractInput(td.Inputs, "runtimePlatform.cpuArchitecture"); v != "" {
+			rec.MockedProperties["cpuArchitecture"] = v
+		}
+		if v := awsdecode.ExtractInput(td.Inputs, "runtimePlatform.operatingSystemFamily"); v != "" {
+			rec.MockedProperties["osFamily"] = v
+		}
+	}
+}
+
+// resolveTaskDefinition attempts to find a TaskDefinition record that matches
+// the given reference string. The reference may be:
+//   - an exact resource name ("my-task-def")
+//   - an ARN containing the name as a suffix ("arn:aws:ecs:...:task-definition/my-task-def:1")
+//
+// Returns nil when no match is found.
+func resolveTaskDefinition(ref string, index map[string]*internalmodel.ResourceRecord) *internalmodel.ResourceRecord {
+	// Exact name match.
+	if td, ok := index[ref]; ok {
+		return td
+	}
+	// ARN suffix match: "arn:aws:ecs:...:task-definition/<name>:<revision>".
+	for name, td := range index {
+		if strings.HasSuffix(ref, "/"+name) || strings.Contains(ref, "/"+name+":") {
+			return td
+		}
+	}
+	return nil
 }
 
 // Reset clears collected resources and stack outputs so the collector can be
@@ -297,21 +385,34 @@ func (c *ResourceCollector) Invoke(_ context.Context, req *pulumirpc.ResourceInv
 }
 
 // invokeGetAmi infers OS from LookupAmi filters and returns a mock AMI ID.
+// It scans all filter name/values pairs (not just name=="name") as well as
+// the top-level nameRegex field, so patterns like "platform" filters and
+// name-prefix patterns are all considered.
 func (c *ResourceCollector) invokeGetAmi(req *pulumirpc.ResourceInvokeRequest) (*pulumirpc.InvokeResponse, error) {
 	os := ""
 	args := req.GetArgs().GetFields()
 
-	// Parse filters[].values[] where name=="name" to find the AMI name pattern
+	// Helper: try to infer OS from a string, keeping the first match found.
+	tryInfer := func(s string) {
+		if os == "" {
+			if inferredOS, ok := awsdecode.InferOSFromPattern(s); ok {
+				os = inferredOS
+			}
+		}
+	}
+
+	// 1. Top-level nameRegex field.
+	if v, ok := args["nameRegex"]; ok {
+		tryInfer(v.GetStringValue())
+	}
+
+	// 2. filters[].values[] — scan every filter's values, not just name=="name".
 	if filtersVal, ok := args["filters"]; ok {
 		for _, filterItem := range filtersVal.GetListValue().GetValues() {
 			obj := filterItem.GetStructValue().GetFields()
-			if nameVal, ok := obj["name"]; ok && nameVal.GetStringValue() == "name" {
-				if valuesVal, ok := obj["values"]; ok {
-					for _, v := range valuesVal.GetListValue().GetValues() {
-						if inferredOS, ok := inferOSFromPattern(v.GetStringValue()); ok {
-							os = inferredOS
-						}
-					}
+			if valuesVal, ok := obj["values"]; ok {
+				for _, v := range valuesVal.GetListValue().GetValues() {
+					tryInfer(v.GetStringValue())
 				}
 			}
 		}
@@ -320,8 +421,8 @@ func (c *ResourceCollector) invokeGetAmi(req *pulumirpc.ResourceInvokeRequest) (
 	mockAMIID := "ami-mock"
 	mockAMIName := "mock-ami"
 	if os != "" {
-		mockAMIID = "ami-mock-" + os
-		mockAMIName = "mock-ami-" + os
+		mockAMIID = "ami-mock-" + strings.ToLower(os)
+		mockAMIName = "mock-ami-" + strings.ToLower(os)
 		c.mu.Lock()
 		c.amiOSMap[mockAMIID] = os
 		c.mu.Unlock()
@@ -339,7 +440,7 @@ func (c *ResourceCollector) invokeGetSSMParameter(req *pulumirpc.ResourceInvokeR
 	os := ""
 	args := req.GetArgs().GetFields()
 	if nameVal, ok := args["name"]; ok {
-		if inferredOS, ok := inferOSFromPattern(nameVal.GetStringValue()); ok {
+		if inferredOS, ok := awsdecode.InferOSFromPattern(nameVal.GetStringValue()); ok {
 			os = inferredOS
 		}
 	}
@@ -359,24 +460,6 @@ func (c *ResourceCollector) invokeGetSSMParameter(req *pulumirpc.ResourceInvokeR
 		"name":  mockName,
 	})
 	return &pulumirpc.InvokeResponse{Return: ret}, nil
-}
-
-// inferOSFromPattern infers "linux" or "windows" from an AMI name pattern or SSM path.
-func inferOSFromPattern(pattern string) (string, bool) {
-	lower := strings.ToLower(pattern)
-	windowsKeywords := []string{"windows", "win2019", "win2022", "win2016", "win2012"}
-	for _, kw := range windowsKeywords {
-		if strings.Contains(lower, kw) {
-			return "windows", true
-		}
-	}
-	linuxKeywords := []string{"linux", "ubuntu", "debian", "rhel", "redhat", "red-hat", "centos", "suse", "amzn", "amazon-linux", "al2023", "al2"}
-	for _, kw := range linuxKeywords {
-		if strings.Contains(lower, kw) {
-			return "linux", true
-		}
-	}
-	return "", false
 }
 
 // ---------------------------------------------------------------------------

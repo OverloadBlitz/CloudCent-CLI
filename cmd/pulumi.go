@@ -240,6 +240,11 @@ func runPulumiEstimate(cmd *cobra.Command, args []string) error {
 	// 6. Wait for the program to finish registering all resources
 	srv.Collector.Wait()
 
+	// Propagate TaskDefinition attributes (cpu, memory, runtimePlatform) into
+	// the MockedProperties of any ECS Service that references them, so the
+	// decoder can read them without re-traversing the resource graph.
+	srv.Collector.InjectECSCrossResourceAttrs()
+
 	// 7. Print collected resources
 	resources := srv.Collector.Resources
 	if len(resources) == 0 {

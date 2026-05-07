@@ -2,6 +2,7 @@ package resources
 
 import (
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
+	"github.com/shopspring/decimal"
 )
 
 type ResourceRecord struct {
@@ -30,15 +31,15 @@ type DecodedResource struct {
 
 // PriceEntry is one pricing option for a resource.
 type PriceEntry struct {
-	Model          string     // OnDemand, Reserved, spot, ComputeSavingsPlans, EC2InstanceSavingsPlans
-	PurchaseOption string     // standard, convertible, All Upfront, Partial Upfront, No Upfront
-	Term           string     // 1yr, 3yr, or empty for on-demand/spot
-	UpfrontFee     string     // dollar amount or empty
-	RatePerHr      float64    // hourly rate (first tier for tiered pricing)
-	Unit           string     // Hrs, Requests, etc.
-	IsCurrent      bool       // true for the OnDemand price (what you pay right now)
-	IsUsageBased   bool       // true when unit is not time-based (e.g. Requests, Messages, GB)
-	Tiers          []RateTier // non-nil when pricing is volume-tiered
+	Model          string          // OnDemand, Reserved, spot, ComputeSavingsPlans, EC2InstanceSavingsPlans
+	PurchaseOption string          // standard, convertible, All Upfront, Partial Upfront, No Upfront
+	Term           string          // 1yr, 3yr, or empty for on-demand/spot
+	UpfrontFee     string          // dollar amount or empty
+	RatePerHr      decimal.Decimal // hourly rate (first tier for tiered pricing)
+	Unit           string          // Hrs, Requests, etc.
+	IsCurrent      bool            // true for the OnDemand price (what you pay right now)
+	IsUsageBased   bool            // true when unit is not time-based (e.g. Requests, Messages, GB)
+	Tiers          []RateTier      // non-nil when pricing is volume-tiered
 }
 
 // RateTier is a single tier within volume-based pricing.
@@ -54,16 +55,16 @@ type EstimateResult struct {
 	RawType      string
 	Product      string
 	Props        map[string]string
-	InputsJSON   string       // formatted Pulumi input properties, empty for non-Pulumi estimates
-	Prices       []PriceEntry // structured pricing options; nil if no pricing
-	OnDemandRate float64      // convenience: the OnDemand hourly rate (0 if unknown)
-	StatusMsg    string       // non-empty when pricing lookup failed
+	InputsJSON   string          // formatted Pulumi input properties, empty for non-Pulumi estimates
+	Prices       []PriceEntry    // structured pricing options; nil if no pricing
+	OnDemandRate decimal.Decimal // convenience: the OnDemand hourly rate (zero if unknown)
+	StatusMsg    string          // non-empty when pricing lookup failed
 	// Usage-based fields
-	IsUsageBased bool    // true when pricing is per-request/message/GB rather than per-hour
-	UsageUnit    string  // e.g. "Requests", "Messages", "GB"
-	UsageQty     float64 // monthly quantity used for estimation (user-supplied or default)
-	UsageDefault bool    // true when UsageQty came from the built-in default
-	UsageMonthly float64 // estimated monthly cost = f(tiers, UsageQty)
+	IsUsageBased bool            // true when pricing is per-request/message/GB rather than per-hour
+	UsageUnit    string          // e.g. "Requests", "Messages", "GB"
+	UsageQty     float64         // monthly quantity used for estimation (user-supplied or default)
+	UsageDefault bool            // true when UsageQty came from the built-in default
+	UsageMonthly decimal.Decimal // estimated monthly cost = f(tiers, UsageQty)
 	// Region metadata
 	RegionFallback bool // true when region was not detected and us-east-1 was used
 }

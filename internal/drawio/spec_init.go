@@ -14,6 +14,10 @@ import (
 // suitable for `diagram init`. DrawioResources in metadata drives which
 // services are billable, what attrs to expose, and what defaults to pre-fill.
 //
+// Lookup uses Component.ShapeKey (full normalised key, e.g.
+// "mxgraph.aws4.ec2_instance") when available, falling back to ServiceType
+// for components without a ShapeKey.
+//
 // When meta is nil (metadata not yet downloaded), all components are written
 // with noPricing: true so the file is still useful as a starting point.
 func GenerateSpec(d *Diagram, meta *api.MetadataResponse, defaultRegion string) Spec {
@@ -27,9 +31,10 @@ func GenerateSpec(d *Diagram, meta *api.MetadataResponse, defaultRegion string) 
 
 	for _, comp := range d.Components {
 		entry := SpecComponent{
-			ID:      comp.ID,
-			Label:   comp.Label,
-			Service: comp.ServiceType,
+			ID:       comp.ID,
+			Label:    comp.Label,
+			Service:  comp.ServiceType,
+			ShapeKey: comp.ShapeKey,
 		}
 		// Only override the per-component provider when it differs from the
 		// spec default — keeps the YAML quiet for the common single-cloud case.
@@ -37,16 +42,40 @@ func GenerateSpec(d *Diagram, meta *api.MetadataResponse, defaultRegion string) 
 			entry.Provider = comp.Provider
 		}
 
-		def, found := lookupDrawioDef(comp.ServiceType, meta)
+		// Use ShapeKey for lookup when available; fall back to ServiceType.
+		lookupKey := comp.ShapeKey
+		if lookupKey == "" {
+			lookupKey = comp.ServiceType
+		}
+
+		def, found := lookupDrawioDef(lookupKey, meta)
 		if !found {
 			entry.NoPricing = true
 			spec.Components = append(spec.Components, entry)
 			continue
 		}
 
-		// Build attrs map: pre-fill defaults from the def, leave the rest empty.
-		entry.Attrs = make(map[string]string, len(def.Attrs))
-		for canonicalName, attrDef := range def.Attrs {
+		// Build effective attrs: inherit from pulumi def first, then overlay
+		// drawio def attrs (same merge logic as ToDecoded).
+		effectiveAttrs := make(map[string]api.DrawioAttrMapping)
+
+		if def.PulumiType != "" && meta != nil {
+			if pulumiDef, ok := meta.PulumiResources[def.PulumiType]; ok {
+				for k, pa := range pulumiDef.Attrs {
+					effectiveAttrs[k] = api.DrawioAttrMapping{
+						Default: pa.Default,
+						Map:     pa.Map,
+					}
+				}
+			}
+		}
+		for k, da := range def.Attrs {
+			effectiveAttrs[k] = da
+		}
+
+		// Build attrs map: pre-fill defaults from the effective def.
+		entry.Attrs = make(map[string]string, len(effectiveAttrs))
+		for canonicalName, attrDef := range effectiveAttrs {
 			entry.Attrs[canonicalName] = attrDef.Default // may be ""
 		}
 
@@ -106,6 +135,9 @@ func componentNode(comp SpecComponent, meta *api.MetadataResponse) *yaml.Node {
 	appendScalar(n, "id", comp.ID, "")
 	appendScalar(n, "label", comp.Label, "")
 	appendScalar(n, "service", comp.Service, "")
+	if comp.ShapeKey != "" {
+		appendScalar(n, "shapeKey", comp.ShapeKey, "")
+	}
 
 	if comp.Provider != "" {
 		appendScalar(n, "provider", comp.Provider, "")
@@ -123,17 +155,31 @@ func componentNode(comp SpecComponent, meta *api.MetadataResponse) *yaml.Node {
 		return n
 	}
 
-	// Resolve the def to get canonical attr ordering.
-	def, _ := lookupDrawioDef(comp.Service, meta)
+	// Resolve the effective def (merging pulumi + drawio) for attr ordering.
+	lookupKey := comp.ShapeKey
+	if lookupKey == "" {
+		lookupKey = comp.Service
+	}
+	def, _ := lookupDrawioDef(lookupKey, meta)
+
+	// Build effective attrs for ordering (same merge as GenerateSpec).
+	effectiveAttrs := make(map[string]api.DrawioAttrMapping)
+	if def.PulumiType != "" && meta != nil {
+		if pulumiDef, ok := meta.PulumiResources[def.PulumiType]; ok {
+			for k, pa := range pulumiDef.Attrs {
+				effectiveAttrs[k] = api.DrawioAttrMapping{Default: pa.Default, Map: pa.Map}
+			}
+		}
+	}
+	for k, da := range def.Attrs {
+		effectiveAttrs[k] = da
+	}
 
 	attrsNode := &yaml.Node{Kind: yaml.MappingNode}
-	keys := orderAttrKeys(comp.Attrs, def)
+	keys := orderAttrKeys(comp.Attrs, effectiveAttrs)
 	for _, k := range keys {
 		v := comp.Attrs[k]
-		product := ""
-		if def.Product != "" {
-			product = def.Product
-		}
+		product := def.Product
 		comment := exampleComment(meta, product, k)
 		appendScalar(attrsNode, k, v, comment)
 	}
@@ -159,13 +205,12 @@ func appendScalar(parent *yaml.Node, key, value, headComment string) {
 }
 
 // orderAttrKeys returns attr keys in a stable order: def-defined keys first
-// (in map iteration order, then sorted for determinism), then any extra
-// user-added keys sorted alphabetically.
-func orderAttrKeys(attrs map[string]string, def api.DrawioResourceDef) []string {
+// (sorted for determinism), then any extra user-added keys sorted alphabetically.
+func orderAttrKeys(attrs map[string]string, effectiveAttrs map[string]api.DrawioAttrMapping) []string {
 	seen := map[string]bool{}
 	// Collect def keys in sorted order for determinism.
-	defKeys := make([]string, 0, len(def.Attrs))
-	for k := range def.Attrs {
+	defKeys := make([]string, 0, len(effectiveAttrs))
+	for k := range effectiveAttrs {
 		defKeys = append(defKeys, k)
 	}
 	sort.Strings(defKeys)

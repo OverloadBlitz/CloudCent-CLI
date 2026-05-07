@@ -6,6 +6,7 @@ import (
 
 	"github.com/OverloadBlitz/cloudcent-cli/internal/api"
 	"github.com/OverloadBlitz/cloudcent-cli/internal/pulumi/resources"
+	awsdecode "github.com/OverloadBlitz/cloudcent-cli/internal/pulumi/resources/aws"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 )
 
@@ -80,7 +81,7 @@ func TestApplyValueMap(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := applyValueMap(tt.val, tt.m)
+			got := awsdecode.ApplyValueMap(tt.val, tt.m)
 			if got != tt.want {
 				t.Errorf("applyValueMap(%q) = %q, want %q", tt.val, got, tt.want)
 			}
@@ -276,7 +277,7 @@ func TestInferOSFromPatternOnlyReturnsKnownMatches(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.pattern, func(t *testing.T) {
-			gotOS, gotOK := inferOSFromPattern(tt.pattern)
+			gotOS, gotOK := awsdecode.InferOSFromPattern(tt.pattern)
 			if gotOS != tt.wantOS || gotOK != tt.wantOK {
 				t.Fatalf("inferOSFromPattern(%q) = (%q, %v), want (%q, %v)", tt.pattern, gotOS, gotOK, tt.wantOS, tt.wantOK)
 			}

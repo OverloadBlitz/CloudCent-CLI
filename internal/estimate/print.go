@@ -8,6 +8,7 @@ import (
 	"github.com/OverloadBlitz/cloudcent-cli/internal/pulumi/resources"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/table"
+	"github.com/shopspring/decimal"
 )
 
 var (
@@ -16,6 +17,8 @@ var (
 	colCurrent = lipgloss.Color("#22C55E")
 	colMuted   = lipgloss.Color("#64748B")
 	colTitle   = lipgloss.Color("#FFFFFF")
+	colWarn    = lipgloss.Color("#F59E0B")
+	colFree    = lipgloss.Color("#22C55E")
 )
 
 // resultGroup holds one or more EstimateResults that share the same resource name.
@@ -99,7 +102,13 @@ func PrintResults(results []resources.EstimateResult) {
 			}
 
 			if r.StatusMsg != "" {
-				fmt.Printf("    %s %s\n", mutedSt.Render("Pricing:"), r.StatusMsg)
+				var msgSt lipgloss.Style
+				if strings.Contains(r.StatusMsg, "free") {
+					msgSt = lipgloss.NewStyle().Foreground(colFree)
+				} else {
+					msgSt = lipgloss.NewStyle().Foreground(colWarn)
+				}
+				fmt.Printf("    %s %s\n", mutedSt.Render("Pricing:"), msgSt.Render(r.StatusMsg))
 				continue
 			}
 
@@ -118,14 +127,14 @@ func PrintResults(results []resources.EstimateResult) {
 					fmt.Printf("    %s %s  →  %s\n",
 						mutedSt.Render(fmt.Sprintf("%-18s", "Usage estimate")),
 						qtyPart,
-						titleSt.Render(fmt.Sprintf("$%.12f / mo", r.UsageMonthly)),
+						titleSt.Render("$"+r.UsageMonthly.StringFixed(10)+" / mo"),
 					)
 				} else {
 					qtyLabel := formatUsageQty(r.UsageQty) + " " + r.UsageUnit + "/mo"
 					fmt.Printf("    %s %s  →  %s\n",
 						mutedSt.Render(fmt.Sprintf("%-18s", "Usage estimate")),
 						mutedSt.Render(qtyLabel),
-						titleSt.Render(fmt.Sprintf("$%.12f / mo", r.UsageMonthly)),
+						titleSt.Render("$"+r.UsageMonthly.StringFixed(10)+" / mo"),
 					)
 				}
 			}
@@ -133,25 +142,25 @@ func PrintResults(results []resources.EstimateResult) {
 	}
 
 	// Totals
-	var totalHourly float64
-	var totalUsageMonthly float64
+	totalHourly := decimal.Zero
+	totalUsageMonthly := decimal.Zero
 	hasHourlyCost := false
 	hasUsageCost := false
 
 	for _, r := range results {
-		if r.OnDemandRate > 0 {
-			totalHourly += r.OnDemandRate
+		if r.OnDemandRate.IsPositive() {
+			totalHourly = totalHourly.Add(r.OnDemandRate)
 			hasHourlyCost = true
 		}
-		if r.IsUsageBased && r.UsageMonthly > 0 {
-			totalUsageMonthly += r.UsageMonthly
+		if r.IsUsageBased && r.UsageMonthly.IsPositive() {
+			totalUsageMonthly = totalUsageMonthly.Add(r.UsageMonthly)
 			hasUsageCost = true
 		}
 	}
 
 	fmt.Println()
 	if hasHourlyCost || hasUsageCost {
-		monthly := totalHourly * 24 * 30
+		monthly := totalHourly.Mul(decimal.NewFromInt(hoursPerMonth))
 		fmt.Println(renderTotalsBox(totalHourly, monthly, totalUsageMonthly, hasUsageCost))
 	} else {
 		fmt.Println(mutedSt.Render("Total: no billable resources found"))
@@ -235,7 +244,7 @@ func renderFlatPricesTable(prices []resources.PriceEntry) string {
 			unit = "$/" + p.Unit
 		}
 		_ = unit // used in header
-		row = append(row, fmt.Sprintf("%.12f", p.RatePerHr))
+		row = append(row, p.RatePerHr.String())
 		rows = append(rows, row)
 	}
 
@@ -313,7 +322,7 @@ func renderTieredPricesTable(prices []resources.PriceEntry) string {
 			}
 			rows = append(rows, []string{
 				marker, p.Model, "-", "-",
-				fmt.Sprintf("%.12f", p.RatePerHr),
+				p.RatePerHr.String(),
 				p.Unit,
 			})
 			continue
@@ -372,45 +381,46 @@ func formatRange(s string) string {
 	return s
 }
 
-func renderTotalsBox(hourly, monthly, usageMonthly float64, hasUsage bool) string {
+func renderTotalsBox(hourly, monthly, usageMonthly decimal.Decimal, hasUsage bool) string {
 	labelSt := lipgloss.NewStyle().Foreground(colHeader)
 	valueSt := lipgloss.NewStyle().Foreground(colTitle).Bold(true)
 	mutedSt := lipgloss.NewStyle().Foreground(colMuted)
 
 	lines := []string{}
 
-	if hourly > 0 {
+	if hourly.IsPositive() {
 		lines = append(lines,
 			fmt.Sprintf("%s  %s",
 				labelSt.Render(fmt.Sprintf("%-24s", "Hourly resources")),
-				valueSt.Render(fmt.Sprintf("%8.4f / hr", hourly)),
+				valueSt.Render(fmt.Sprintf("%s / hr", formatDecimal(hourly, 10))),
 			),
 			fmt.Sprintf("%s  %s",
-				labelSt.Render(fmt.Sprintf("%-24s", "  → estimated monthly")),
-				valueSt.Render(fmt.Sprintf("%8.2f / mo", monthly)),
+				labelSt.Render(fmt.Sprintf("%-24s", fmt.Sprintf("  → est. monthly (%dh)", hoursPerMonth))),
+				valueSt.Render(fmt.Sprintf("%s / mo", formatDecimal(monthly, 4))),
 			),
 		)
 	}
 
 	if hasUsage {
 		if len(lines) > 0 {
-			lines = append(lines, mutedSt.Render(strings.Repeat("─", 38)))
+			lines = append(lines, mutedSt.Render(strings.Repeat("─", 42)))
 		}
 		lines = append(lines,
 			fmt.Sprintf("%s  %s",
 				labelSt.Render(fmt.Sprintf("%-24s", "Usage-based resources")),
-				valueSt.Render(fmt.Sprintf("%8.2f / mo", usageMonthly)),
+				valueSt.Render(fmt.Sprintf("%s / mo", formatDecimal(usageMonthly, 4))),
 			),
 			mutedSt.Render("  (based on supplied or default quantities)"),
 		)
 	}
 
-	if hourly > 0 && hasUsage {
-		lines = append(lines, mutedSt.Render(strings.Repeat("─", 38)))
+	if hourly.IsPositive() && hasUsage {
+		total := monthly.Add(usageMonthly)
+		lines = append(lines, mutedSt.Render(strings.Repeat("─", 42)))
 		lines = append(lines,
 			fmt.Sprintf("%s  %s",
 				labelSt.Render(fmt.Sprintf("%-24s", "Total estimated monthly")),
-				valueSt.Render(fmt.Sprintf("%8.2f / mo", monthly+usageMonthly)),
+				valueSt.Render(fmt.Sprintf("%s / mo", formatDecimal(total, 4))),
 			),
 		)
 	}
@@ -421,6 +431,24 @@ func renderTotalsBox(hourly, monthly, usageMonthly float64, hasUsage bool) strin
 		BorderForeground(colBorder).
 		Padding(0, 2).
 		Render(body)
+}
+
+// formatDecimal formats a decimal.Decimal for display, trimming trailing zeros
+// but keeping at least `minDecimals` decimal places.
+func formatDecimal(d decimal.Decimal, minDecimals int32) string {
+	// Use enough precision to show meaningful digits, then trim trailing zeros.
+	s := d.StringFixed(minDecimals)
+	// Trim trailing zeros after decimal point, but keep at least 2 decimal places.
+	if strings.Contains(s, ".") {
+		s = strings.TrimRight(s, "0")
+		// Ensure at least 2 decimal places for currency readability.
+		if idx := strings.Index(s, "."); idx >= 0 && len(s)-idx-1 < 2 {
+			for len(s)-strings.Index(s, ".")-1 < 2 {
+				s += "0"
+			}
+		}
+	}
+	return "$" + s
 }
 
 func indent(s, prefix string) string {

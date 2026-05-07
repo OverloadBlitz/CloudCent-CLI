@@ -30,7 +30,8 @@ type SpecDefaults struct {
 type SpecComponent struct {
 	ID        string            `yaml:"id"`
 	Label     string            `yaml:"label"`
-	Service   string            `yaml:"service"`
+	Service   string            `yaml:"service"`            // short service suffix, e.g. "ec2_instance"
+	ShapeKey  string            `yaml:"shapeKey,omitempty"` // full normalised shape key, e.g. "mxgraph.aws4.ec2_instance"
 	Provider  string            `yaml:"provider,omitempty"`
 	Region    string            `yaml:"region,omitempty"`
 	Attrs     map[string]string `yaml:"attrs,omitempty"`
@@ -38,13 +39,14 @@ type SpecComponent struct {
 	NoPricing bool              `yaml:"noPricing,omitempty"`
 }
 
-// lookupDrawioDef returns the DrawioResourceDef for a draw.io service suffix.
+// lookupDrawioDef returns the DrawioResourceDef for a draw.io component.
+// shapeKey is the full normalised shape key, e.g. "mxgraph.aws4.ec2_instance".
 // Lookup is case-insensitive. Returns (def, true) when found.
-func lookupDrawioDef(service string, meta *api.MetadataResponse) (api.DrawioResourceDef, bool) {
+func lookupDrawioDef(shapeKey string, meta *api.MetadataResponse) (api.DrawioResourceDef, bool) {
 	if meta == nil || len(meta.DrawioResources) == 0 {
 		return api.DrawioResourceDef{}, false
 	}
-	key := strings.ToLower(strings.TrimSpace(service))
+	key := strings.ToLower(strings.TrimSpace(shapeKey))
 	// Exact match first.
 	if def, ok := meta.DrawioResources[key]; ok {
 		return def, true
@@ -60,6 +62,16 @@ func lookupDrawioDef(service string, meta *api.MetadataResponse) (api.DrawioReso
 
 // ToDecoded converts a SpecComponent into the resources.DecodedResource shape
 // consumed by estimate.EstimateAllResources.
+//
+// Lookup uses ShapeKey (full normalised key, e.g. "mxgraph.aws4.ec2_instance")
+// when available, falling back to Service for backward compatibility with
+// specs written before ShapeKey was introduced.
+//
+// When the DrawioResourceDef has a PulumiType set, attrs are inherited from
+// the corresponding PulumiResourceDef in meta.PulumiResources. The drawio
+// def's own Attrs then overlay those inherited values (drawio defaults win
+// over pulumi defaults). User-supplied values in s.Attrs always take highest
+// priority.
 //
 // meta is required to resolve the DrawioResourceDef for the component's
 // service. When meta is nil or the service is not found in DrawioResources,
@@ -85,7 +97,14 @@ func (s SpecComponent) ToDecoded(defaults SpecDefaults, meta *api.MetadataRespon
 		}, nil
 	}
 
-	def, found := lookupDrawioDef(s.Service, meta)
+	// Use ShapeKey for lookup when available; fall back to Service for
+	// backward compatibility with older spec files.
+	lookupKey := s.ShapeKey
+	if lookupKey == "" {
+		lookupKey = s.Service
+	}
+
+	def, found := lookupDrawioDef(lookupKey, meta)
 	if !found {
 		// Service not in metadata — treat as no-pricing.
 		return resources.DecodedResource{
@@ -103,11 +122,40 @@ func (s SpecComponent) ToDecoded(defaults SpecDefaults, meta *api.MetadataRespon
 		provider = def.Provider
 	}
 
-	// Build attrs: apply defaults from def, then overlay user-supplied values,
-	// then apply value maps from def.
-	attrs := make(map[string]string, len(def.Attrs))
+	// Resolve product: prefer def.Product, fall back to pulumi def's product.
+	product := def.Product
 
-	for canonicalName, attrDef := range def.Attrs {
+	// Build the effective attr definitions by merging pulumi def (base) with
+	// drawio def (overlay). This avoids duplicating attr definitions when
+	// pulumi_type is set.
+	effectiveAttrs := make(map[string]api.DrawioAttrMapping)
+
+	if def.PulumiType != "" && meta != nil {
+		if pulumiDef, ok := meta.PulumiResources[def.PulumiType]; ok {
+			// Inherit attrs from the pulumi def as the base layer.
+			for k, pa := range pulumiDef.Attrs {
+				effectiveAttrs[k] = api.DrawioAttrMapping{
+					Default: pa.Default,
+					Map:     pa.Map,
+				}
+			}
+			// Inherit product from pulumi def when drawio def doesn't set one.
+			if product == "" && pulumiDef.Product != "" {
+				product = pulumiDef.Product
+			}
+		}
+	}
+
+	// Overlay drawio def attrs (drawio defaults override pulumi defaults).
+	for k, da := range def.Attrs {
+		effectiveAttrs[k] = da
+	}
+
+	// Build attrs: apply effective defaults, then overlay user-supplied values,
+	// then apply value maps.
+	attrs := make(map[string]string, len(effectiveAttrs))
+
+	for canonicalName, attrDef := range effectiveAttrs {
 		val := ""
 
 		// User-supplied value takes priority.
@@ -115,7 +163,7 @@ func (s SpecComponent) ToDecoded(defaults SpecDefaults, meta *api.MetadataRespon
 			val = strings.TrimSpace(v)
 		}
 
-		// Fall back to default from metadata.
+		// Fall back to default from effective def.
 		if val == "" && attrDef.Default != "" {
 			val = attrDef.Default
 		}
@@ -130,9 +178,9 @@ func (s SpecComponent) ToDecoded(defaults SpecDefaults, meta *api.MetadataRespon
 		}
 	}
 
-	// Validate: every attr defined in the def must have a value.
+	// Validate: every attr defined in the effective def must have a value.
 	var missing []string
-	for canonicalName := range def.Attrs {
+	for canonicalName := range effectiveAttrs {
 		if strings.TrimSpace(attrs[canonicalName]) == "" {
 			missing = append(missing, canonicalName)
 		}
@@ -147,7 +195,7 @@ func (s SpecComponent) ToDecoded(defaults SpecDefaults, meta *api.MetadataRespon
 	return resources.DecodedResource{
 		Provider:    provider,
 		Region:      region,
-		Service:     def.Product,
+		Service:     product,
 		Name:        displayName(s),
 		RawType:     s.Service,
 		Attrs:       attrs,
