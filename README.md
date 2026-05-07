@@ -42,14 +42,31 @@ cloudcent init
 
 Run `cloudcent init` to authenticate via browser. This sets up a free API key stored at `~/.cloudcent/config.yaml`.
 
+## Demo
+
+### Draw.io
+```
+cloudcent diagram init aws-saas-example.drawio 
+
+cloudcent diagram estimate aws-saas-example.drawio
+```
+![drawio-demo1](/docs/drawio-demo1.png)
+
+
+### Pulumi
+```
+cloudcent pulumi estimate
+```
+![pulumi-demo1](/docs/pulumi-demo1.png)
+
 ## Supported Cloud Resources
 
-| Provider | Services | Pricing Model | Data Source |
-|----------|----------|---------------|-------------|
-| AWS | EC2, ECS, EKS, S3, RDS, ElastiCache, EMR, SageMaker, Bedrock, Direct Connect, Data Transfer, Backup | OnDemand, Reserved, SavingPlan, Spot | AWS Pricing API |
-| Azure | Virtual Machines, AKS, Container, Storage, SQL Database, Redis, Backup, Machine Learning, OpenAI, ExpressRoute, Bandwidth, Big Data | OnDemand, Reserved, SavingPlan (with/without Azure Hybrid Benefit) | Azure Pricing Calculator |
-| GCP | Compute Engine, Cloud Storage, Cloud SQL, GKE, Memorystore, Vertex AI, Big Data, Data Transfer | OnDemand, CommittedUseDiscount, Preemptible | GCP Pricing SDK v1 |
-| OCI | Compute, Object Storage, Database Instance, Cache, Backup, FastConnect, Data Transfer, Generative AI | OnDemand (PAYG) | OCI Cost Estimator |
+| Provider | Services                                                      | Pricing Model | Data Source |
+|----------|---------------------------------------------------------------|---------------|-------------|
+| AWS | EC2, EBS, ECS, S3, ApiGateway, AppSync, DynamoDB, Lambda, SNS | OnDemand, Reserved, SavingPlan, Spot | AWS Pricing API |
+| Azure | WIP                                                           | OnDemand, Reserved, SavingPlan (with/without Azure Hybrid Benefit) | Azure Pricing Calculator |
+| GCP | WIP                                                           | OnDemand, CommittedUseDiscount, Preemptible | GCP Pricing SDK v1 |
+| OCI | WIP                                                           | OnDemand (PAYG) | OCI Cost Estimator |
 
 ## CLI Commands
 
@@ -82,12 +99,8 @@ Data files:
 
 ## Reporting Issues
 
-Found a bug or have a feature request? [Open an issue](https://github.com/OverloadBlitz/cloudcent-cli/issues) and include:
+[Open an issue](https://github.com/OverloadBlitz/cloudcent-cli/issues)
 
-- A clear description of the problem or request
-- Steps to reproduce (for bugs)
-- Your OS and architecture (e.g. macOS arm64, Linux x64)
-- Any relevant error output or screenshots
 
 ## Honorable Mention
 The `0.0.2-beta-legacy` branch includes a deprecated TUI for querying cloud costs across providers. It is no longer supported due to changes in the pricing data model, but remains noted here as an honorable mention.
