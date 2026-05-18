@@ -30,7 +30,7 @@ const defaultUsageQty = 1_000_000
 // All quantities are in the unit returned by the pricing API for that resource.
 var serviceUsageDefaults = map[string]float64{
 	// S3 — GB-Mo / requests
-	"S3/Storage":      100,
+	"S3/Storage":      25,
 	"S3/Requests-PUT": 10_000,
 	"S3/Requests-GET": 100_000,
 
@@ -620,16 +620,29 @@ func resolveUsageQty(resourceName, service, subLabel, rawType string, usageMap m
 			return v, true
 		}
 	}
-	// 3. Per-service/subLabel default.
+	// 3. Per-service/subLabel default — try exact then case-insensitive.
 	if subLabel != "" {
-		if v, ok := serviceUsageDefaults[service+"/"+subLabel]; ok {
+		key := service + "/" + subLabel
+		if v, ok := serviceUsageDefaults[key]; ok {
 			return v, true
 		}
+		keyLower := strings.ToLower(key)
+		for k, v := range serviceUsageDefaults {
+			if strings.ToLower(k) == keyLower {
+				return v, true
+			}
+		}
 	}
-	// 4. Per-service default (bare key).
+	// 4. Per-service default — try exact then case-insensitive.
 	if service != "" {
 		if v, ok := serviceUsageDefaults[service]; ok {
 			return v, true
+		}
+		serviceLower := strings.ToLower(service)
+		for k, v := range serviceUsageDefaults {
+			if strings.ToLower(k) == serviceLower {
+				return v, true
+			}
 		}
 	}
 	// 5. Global fallback.

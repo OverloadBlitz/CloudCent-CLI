@@ -77,23 +77,23 @@ cloudcent diagram init aws-saas-example.drawio
 
 cloudcent diagram estimate aws-saas-example.drawio
 ```
-![drawio-demo1](/docs/drawio-demo1.png)
+TBD
 
 
 ### Pulumi
 ```
 cloudcent pulumi estimate
 ```
-![pulumi-demo1](/docs/pulumi-demo1.png)
+![pulumi-demo](/docs/pulumi_demo.png)
 
 ## Supported Cloud Resources
 
-| Provider | Services                                               | Pricing Model | Data Source |
-|----------|--------------------------------------------------------|---------------|-------------|
+| Provider | Services                                                      | Pricing Model | Data Source |
+|----------|---------------------------------------------------------------|---------------|-------------|
 | AWS | EC2, EBS, ECS, S3, ApiGateway, AppSync, DynamoDB, Lambda, SNS | OnDemand, Reserved, SavingPlan, Spot | AWS Pricing API |
-| Azure | Virtual Machines                                                       | OnDemand, Reserved, SavingPlan (with/without Azure Hybrid Benefit) | Azure Pricing Calculator |
-| GCP | Compute Engine                                         | OnDemand, CommittedUseDiscount, Preemptible | GCP Pricing SDK v1 |
-| OCI | WIP                                                    | OnDemand (PAYG) | OCI Cost Estimator |
+| Azure | WIP                                                           | OnDemand, Reserved, SavingPlan (with/without Azure Hybrid Benefit) | Azure Pricing Calculator |
+| GCP | WIP                                                           | OnDemand, CommittedUseDiscount, Preemptible | GCP Pricing SDK v1 |
+| OCI | WIP                                                           | OnDemand (PAYG) | OCI Cost Estimator |
 
 ## CLI Commands
 
